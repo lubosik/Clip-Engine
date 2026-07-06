@@ -1,0 +1,48 @@
+FROM python:3.11-slim
+
+# ffmpeg is NOT needed by the web service (producer/scheduler own it).
+# Only system dep is libpq for psycopg2.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libpq5 \
+        libpq-dev \
+        gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python package in editable mode so all subpackages resolve.
+COPY pyproject.toml ./
+COPY core/ ./core/
+COPY web/ ./web/
+COPY campaigns/ ./campaigns/
+COPY assets/ ./assets/
+
+# Install only the subset of deps needed by the web layer.
+# The full pyproject.toml pulls in heavy ML libs; install selectively here.
+RUN pip install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    sqlalchemy>=2 \
+    alembic \
+    psycopg2-binary \
+    pydantic>=2 \
+    pydantic-settings \
+    pyyaml \
+    httpx \
+    python-multipart \
+    jinja2 \
+    && pip install --no-cache-dir --no-deps -e .
+
+# Create storage dir (Railway mounts a volume here; fallback to local).
+RUN mkdir -p /data/clips/logs /data/clips/thumbs
+
+ENV PORT=8000
+ENV PYTHONUNBUFFERED=1
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT}/api/stats')" || exit 1
+
+EXPOSE $PORT
+
+CMD ["sh", "-c", "uvicorn web.api:app --host 0.0.0.0 --port ${PORT}"]

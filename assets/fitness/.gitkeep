@@ -1,0 +1,4 @@
+# This file keeps the assets/fitness/ directory in git.
+# The actual asset files (logo.png, logo_circle.png, outro.mov, Montserrat-ExtraBold.ttf)
+# are listed in README.md and must be placed here before running the producer.
+# They are excluded from git via .gitignore.

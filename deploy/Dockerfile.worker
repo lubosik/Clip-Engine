@@ -1,0 +1,68 @@
+FROM python:3.11-slim
+
+# Worker image — used by both the producer and scheduler services.
+# Requires: ffmpeg, yt-dlp, fonts for caption rendering.
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libpq5 \
+        libpq-dev \
+        gcc \
+        # fonts
+        fonts-dejavu-core \
+        fontconfig \
+        # OpenCV headless system libs
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        libgl1-mesa-glx \
+        # yt-dlp deps
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install yt-dlp (not available via apt in slim; use pip or direct download).
+RUN pip install --no-cache-dir yt-dlp
+
+WORKDIR /app
+
+# Copy the full package.
+COPY pyproject.toml ./
+COPY core/ ./core/
+COPY producer/ ./producer/
+COPY scheduler/ ./scheduler/
+COPY web/ ./web/
+COPY campaigns/ ./campaigns/
+COPY assets/ ./assets/
+
+# Install all Python dependencies.
+RUN pip install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    sqlalchemy>=2 \
+    alembic \
+    psycopg2-binary \
+    pydantic>=2 \
+    pydantic-settings \
+    pyyaml \
+    apify-client \
+    httpx \
+    anthropic \
+    faster-whisper \
+    opencv-python-headless \
+    mediapipe \
+    python-multipart \
+    jinja2 \
+    && pip install --no-cache-dir --no-deps -e .
+
+RUN mkdir -p /data/clips/raw /data/clips/clips /data/clips/thumbs /data/clips/logs
+
+ENV PYTHONUNBUFFERED=1
+ENV STORAGE_DIR=/data/clips
+
+# The CMD is overridden per Railway service:
+#   producer:  python -m producer.run --all
+#   scheduler-schedule: python -m scheduler.schedule
+#   scheduler-analytics: python -m scheduler.analytics
+CMD ["python", "-m", "producer.run", "--all"]

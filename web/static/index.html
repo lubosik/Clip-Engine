@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Clip Engine">
+  <meta name="theme-color" content="#0f0f0f">
+  <meta name="description" content="Operator review console for Clip Engine campaigns">
+
+  <title>Clip Engine</title>
+
+  <!-- PWA manifest -->
+  <link rel="manifest" href="/manifest.webmanifest">
+
+  <!-- iOS home-screen icons -->
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" sizes="512x512" href="/icons/icon-512.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="/icons/icon.svg">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<!-- ── Auth screen (shown until a valid token is stored) ──────────────────── -->
+<div id="auth-screen">
+  <div class="auth-box">
+    <div class="auth-logo">
+      <div class="auth-logo-mark" aria-hidden="true">
+        <!-- Inline logo mark (SVG, no external request) -->
+        <svg width="36" height="36" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M32 7A25 25 0 1 1 7 32" stroke="#00e5ff" stroke-width="7" stroke-linecap="round"/>
+          <circle cx="32" cy="32" r="5" fill="#00e5ff"/>
+        </svg>
+      </div>
+      <h1>Clip Engine</h1>
+      <p>Operator Review Console</p>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label" for="auth-password">Admin Password</label>
+      <input
+        type="password"
+        id="auth-password"
+        class="form-control"
+        placeholder="Enter password"
+        autocomplete="current-password"
+        autocapitalize="none"
+      >
+      <div class="auth-error" id="auth-error" role="alert"></div>
+    </div>
+
+    <button class="btn btn-primary btn-full" id="auth-submit">Unlock</button>
+  </div>
+</div>
+
+
+<!-- ── Main app shell ─────────────────────────────────────────────────────── -->
+<div id="app" style="display:none" role="application" aria-label="Clip Engine">
+
+  <!-- Header -->
+  <header id="header" role="banner">
+    <span id="header-title" aria-live="polite">Clip Engine</span>
+    <span id="header-badge" aria-label="pending clips" aria-hidden="true"></span>
+
+    <!-- Settings -->
+    <button
+      class="header-btn"
+      id="settings-btn"
+      aria-label="Settings"
+      title="Settings"
+    >
+      <!-- Gear icon (inline SVG) -->
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round"
+           aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06
+                 a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09
+                 A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06
+                 a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15
+                 a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9
+                 a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06
+                 A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09
+                 a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06
+                 a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9
+                 a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09
+                 a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+  </header>
+
+  <!-- View container -->
+  <main id="main" role="main">
+    <!-- Views are lazy-rendered by each module on first activation -->
+    <div id="view-queue"     class="view active" role="region" aria-label="Review queue"></div>
+    <div id="view-campaigns" class="view"         role="region" aria-label="Campaigns"></div>
+    <div id="view-analytics" class="view"         role="region" aria-label="Analytics"></div>
+  </main>
+
+  <!-- Tab bar -->
+  <nav id="tab-bar" role="navigation" aria-label="Main navigation">
+
+    <button
+      class="tab-btn active"
+      data-tab="queue"
+      aria-label="Review queue"
+      aria-current="page"
+    >
+      <!-- Inbox / tray icon -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+           aria-hidden="true">
+        <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
+        <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6
+                 l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+      </svg>
+      <span>Queue</span>
+      <span class="tab-badge" id="queue-tab-badge" aria-live="polite" aria-atomic="true"></span>
+    </button>
+
+    <button
+      class="tab-btn"
+      data-tab="campaigns"
+      aria-label="Campaigns"
+    >
+      <!-- Layers / campaign icon -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+           aria-hidden="true">
+        <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+        <polyline points="2 17 12 22 22 17"/>
+        <polyline points="2 12 12 17 22 12"/>
+      </svg>
+      <span>Campaigns</span>
+    </button>
+
+    <button
+      class="tab-btn"
+      data-tab="analytics"
+      aria-label="Analytics"
+    >
+      <!-- Bar chart icon -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+           aria-hidden="true">
+        <line x1="18" y1="20" x2="18" y2="10"/>
+        <line x1="12" y1="20" x2="12" y2="4"/>
+        <line x1="6"  y1="20" x2="6"  y2="14"/>
+      </svg>
+      <span>Analytics</span>
+    </button>
+
+  </nav>
+</div>
+
+
+<!-- ── Global overlays (toasts + sheets injected here by app.js) ──────────── -->
+<div id="toast-container" role="status" aria-live="polite" aria-atomic="false"></div>
+
+<!-- Campaign wizard and bottom sheets are appended to <body> by JS -->
+
+
+<!-- ── App bootstrap (ES module) ──────────────────────────────────────────── -->
+<script type="module" src="/app.js"></script>
+
+</body>
+</html>

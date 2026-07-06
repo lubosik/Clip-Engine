@@ -1,0 +1,86 @@
+name: fitness
+enabled: true
+
+sources:
+  youtube:
+    search_terms:
+      - "hypertrophy science explained"
+      - "protein intake muscle growth"
+      - "progressive overload podcast"
+    channels: []            # optional explicit channel URLs
+    min_view_count: 20000
+    uploaded_within: "year" # hour|day|week|month|year
+  tiktok:
+    profiles: []
+    hashtags: ["fitnesstips", "hypertrophy"]
+  instagram:
+    profiles: []
+
+ranking:
+  clip_length: [20, 60]     # seconds, min/max
+  max_clips_per_source: 8
+  exhaust_source: false
+  min_score: 0.6
+  ranking_rules: |
+    Prefer moments that are genuinely useful or interesting on their own:
+    a clear explanation of a mechanism, a specific actionable tip, a
+    surprising-but-true fact, a vivid story, a strong opinion with reasoning.
+    Each clip must stand alone with a hook in the first 2 seconds.
+    EXCLUDE: unsafe or extreme advice, dangerous dieting/cutting, anything
+    promoting disordered eating, medical claims presented as fact, and
+    anything that would violate TikTok/Instagram community guidelines.
+    When in doubt, skip it.
+
+template:
+  aspect: "9:16"
+  resolution: [1080, 1920]
+  captions:
+    style: "word_by_word"   # CapCut-style, active word highlighted
+    font: "assets/fitness/Montserrat-ExtraBold.ttf"
+    base_color: "#FFFFFF"
+    highlight_color: "#00E5FF"
+    outline_color: "#000000"
+    outline_px: 6
+    position: "upper_mid"
+    max_words_per_line: 4
+  hook:
+    enabled: true
+    show_seconds: [0, 8]
+    source: "ranking"
+    font: "assets/fitness/Montserrat-ExtraBold.ttf"
+    box_color: "#111111CC"
+  lower_third:
+    show_source_handle: true
+    format: "via @{source_handle}"
+  watermark:
+    image: "assets/fitness/logo.png"
+    position: "center"
+    opacity: 0.18
+    scale: 0.5
+  corner_badge:
+    image: "assets/fitness/logo_circle.png"
+    position: "top_right"
+    opacity: 1.0
+    scale: 0.12
+  outro:
+    enabled: true
+    clip: "assets/fitness/outro.mov"
+    audio: "keep"           # keep|mute
+
+destinations:
+  postiz_channels: ["tiktok_fitness", "instagram_fitness"]  # may include X channels
+  schedule:
+    posts_per_day: 1
+    times: ["17:00"]
+    timezone: "America/New_York"
+  caption_template: |
+    {hook}
+
+    via @{source_handle}
+    {hashtags}
+  hashtags: ["#fitness", "#hypertrophy", "#protein", "#gymtok"]
+  autopost: false           # false = draft only, human approves in Postiz too
+
+analytics:
+  track: true
+  pull_day: "monday"

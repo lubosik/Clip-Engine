@@ -1,0 +1,57 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.so
+
+# Alembic
+alembic.ini.local
+
+# Storage — raw downloads and rendered clips are on the Railway volume, not in git
+storage/
+/data/
+
+# Assets — actual media files (logo, outro, font) are not committed
+# The assets/<campaign>/ directories contain .gitkeep and README only
+assets/**/media/
+assets/**/*.png
+assets/**/*.jpg
+assets/**/*.jpeg
+assets/**/*.mov
+assets/**/*.mp4
+assets/**/*.ttf
+assets/**/*.otf
+# Exception: allow the fitness README and .gitkeep
+!assets/fitness/README.md
+!assets/fitness/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# pytest
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Logs
+*.log
+logs/

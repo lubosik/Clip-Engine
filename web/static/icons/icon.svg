@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" fill="#0f0f0f"/>
+  <!-- 'C' ring arc (gap on right side ±32°) -->
+  <path d="
+    M 256,79
+    A 177,177 0 1 1 405,391
+    L 391,369
+    A 153,153 0 1 0 256,103
+    Z
+  " fill="#00e5ff"/>
+  <!-- central dot -->
+  <circle cx="256" cy="256" r="36" fill="#00e5ff"/>
+</svg>
