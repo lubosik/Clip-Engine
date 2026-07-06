@@ -22,8 +22,8 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 try:
-    from core.settings import settings as _settings
-    _WEB_ADMIN_PASSWORD: str = _settings.web_admin_password or ""
+    from core.settings import get_settings
+    _WEB_ADMIN_PASSWORD: str = get_settings().web_admin_password or ""
 except Exception:
     _WEB_ADMIN_PASSWORD = ""
 

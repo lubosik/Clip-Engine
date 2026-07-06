@@ -209,6 +209,10 @@ def _position_to_alignment(position: str, out_h: int) -> tuple[int, int]:
         return 5, 0
     if pos == "lower_third":
         return 2, int(out_h * 0.15)
+    if pos == "lower_mid":
+        return 2, int(out_h * 0.28)
+    if pos == "bottom":
+        return 2, int(out_h * 0.08)
     # Default fallback
     log.warning("captions: unknown position '%s'; defaulting to upper_mid", position)
     return 8, int(out_h * 0.38)

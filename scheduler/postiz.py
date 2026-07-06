@@ -54,9 +54,9 @@ from typing import Any
 import httpx
 
 try:
-    from core.settings import settings
+    from core.settings import get_settings
 except Exception:
-    settings = None  # type: ignore[assignment]
+    get_settings = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -522,9 +522,10 @@ def get_postiz_client() -> Postiz:
     api_url: str = ""
     api_key: str = ""
 
-    if settings is not None:
-        api_url = getattr(settings, "postiz_api_url", "") or ""
-        api_key = getattr(settings, "postiz_api_key", "") or ""
+    if get_settings is not None:
+        _s = get_settings()
+        api_url = getattr(_s, "postiz_api_url", "") or ""
+        api_key = getattr(_s, "postiz_api_key", "") or ""
 
     if not api_url:
         api_url = os.environ.get("POSTIZ_API_URL", "")

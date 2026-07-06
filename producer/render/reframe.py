@@ -198,7 +198,6 @@ def reframe_clip(
     # Build ffmpeg crop position expression
     # ------------------------------------------------------------------
     crop_pos_expr = _build_piecewise_expr(segments)
-    crop_pos_int = int(segments[0]["crop_pos"])  # unused if expr is used
 
     if crop_axis == "x":
         crop_filter = (

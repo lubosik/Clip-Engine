@@ -27,6 +27,27 @@ _CONCAT_AUDIO_RATE = 44100
 _CONCAT_AUDIO_CHANNELS = 2
 
 
+def _has_audio_stream(src: Path) -> bool:
+    """True if *src* contains at least one audio stream (via ffprobe)."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream=index",
+                "-of", "csv=p=0",
+                str(src),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return bool(result.stdout.strip())
+    except Exception as exc:
+        log.warning("ffprobe audio check failed for %s: %s", src, exc)
+        return True  # assume audio present; ffmpeg's 0:a map will surface errors
+
+
 def append_outro(
     main_video: Path,
     cfg_template: Any,
@@ -136,7 +157,10 @@ def _normalize_clip(
         f"fps={_CONCAT_FPS}"
     )
 
-    if mute:
+    # A silent audio track is injected when muting OR when the source has no
+    # audio stream — the concat demuxer requires both clips to carry matching
+    # streams, so every normalized clip must have exactly one audio track.
+    if mute or not _has_audio_stream(src):
         audio_args = [
             "-f", "lavfi", "-i", f"anullsrc=r={_CONCAT_AUDIO_RATE}:cl=stereo",
             "-map", "0:v",
@@ -151,7 +175,7 @@ def _normalize_clip(
 
     cmd = (
         ["ffmpeg", "-y", "-i", str(src)]
-        + (audio_args if mute else [])
+        + audio_args
         + [
             "-vf", vf,
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",

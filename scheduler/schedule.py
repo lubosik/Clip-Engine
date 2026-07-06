@@ -390,7 +390,7 @@ def _persist_scheduled(
             if scheduled_at is not None:
                 # scheduled_at column may not exist on all model versions; set defensively.
                 try:
-                    db_clip.scheduled_at = scheduled_at.astimezone(timezone.utc).replace(tzinfo=None)
+                    db_clip.scheduled_at = scheduled_at.astimezone(timezone.utc)
                 except AttributeError:
                     pass
             session.commit()

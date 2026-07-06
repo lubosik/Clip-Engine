@@ -242,17 +242,14 @@ def _pull_apify_analytics(cfg: Any, channels: list[str], clips: list[Any]) -> No
         logger.warning("core.apify not available; skipping Apify analytics scrape")
         return
 
-    try:
-        from core.settings import settings as _settings
-        apify_token = _settings.apify_token
-    except Exception:
-        import os
-        apify_token = os.environ.get("APIFY_TOKEN", "")
-    if not apify_token:
+    from core.settings import get_settings
+
+    if not get_settings().apify_token:
         logger.warning("APIFY_TOKEN not set; skipping Apify analytics scrape")
         return
 
-    apify = Apify(token=apify_token)
+    # Apify reads APIFY_TOKEN lazily via settings.require_apify()
+    apify = Apify()
 
     for channel in channels:
         platform = _platform_from_channel(channel)
@@ -440,12 +437,12 @@ def _save_analytics_row(
     if get_session is None or Analytics is None:
         return
     try:
-        pulled_at_naive = pulled_at.astimezone(timezone.utc).replace(tzinfo=None)
+        pulled_at_utc = pulled_at.astimezone(timezone.utc)
         with get_session() as session:
             row = Analytics(
                 clip_id=clip_id,
                 platform=platform,
-                pulled_at=pulled_at_naive,
+                pulled_at=pulled_at_utc,
                 views=metrics.get("views", 0),
                 likes=metrics.get("likes", 0),
                 comments=metrics.get("comments", 0),

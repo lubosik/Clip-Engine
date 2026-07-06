@@ -23,6 +23,7 @@ dependencies = [
     "faster-whisper",
     "opencv-python-headless",
     "mediapipe",
+    "pillow",
     "python-multipart",
     "jinja2",
 ]

@@ -70,8 +70,8 @@ except Exception:
     load_enabled_campaigns = None  # type: ignore[assignment]
 
 try:
-    from core.settings import settings as _settings
-    STORAGE_DIR = Path(_settings.storage_dir)
+    from core.settings import get_settings
+    STORAGE_DIR = Path(get_settings().storage_dir)
 except Exception:
     STORAGE_DIR = Path(os.environ.get("STORAGE_DIR", "/data/clips"))
 
@@ -650,7 +650,7 @@ def get_analytics(
                 session.query(Analytics)
                 .filter(
                     Analytics.clip_id.in_(list(posted_clips.keys())),
-                    Analytics.pulled_at >= since.replace(tzinfo=None),
+                    Analytics.pulled_at >= since,
                 )
                 .order_by(Analytics.pulled_at.asc())
                 .all()
