@@ -164,8 +164,19 @@ def rank_moments(
             "Install it with: pip install anthropic"
         ) from exc
 
-    api_key, model = get_settings().require_llm()
-    client = anthropic.Anthropic(api_key=api_key)
+    settings = get_settings()
+    api_key, model = settings.require_llm()
+
+    # Route by provider: explicit LLM_BASE_URL wins; otherwise OpenRouter keys
+    # go to OpenRouter's Anthropic-compatible endpoint, Anthropic keys go direct.
+    base_url = settings.llm_base_url
+    if base_url is None and api_key.startswith("sk-or-"):
+        base_url = "https://openrouter.ai/api"
+    if base_url:
+        client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
+        log.info("LLM client using base_url=%s model=%s", base_url, model)
+    else:
+        client = anthropic.Anthropic(api_key=api_key)
 
     prompt = _build_prompt(transcript, rules, comment_summary, clip_len, max_clips)
 

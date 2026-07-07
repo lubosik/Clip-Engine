@@ -32,8 +32,10 @@ DATABASE_URL=             # reference the Railway Postgres service variable
 APIFY_TOKEN=              # Apify console → Settings → Integrations → API tokens
 POSTIZ_API_URL=https://api.postiz.com
 POSTIZ_API_KEY=           # Postiz Cloud → Settings → Developers → Public API
-LLM_API_KEY=              # Anthropic Console → API keys
-LLM_MODEL=claude-sonnet-4-6
+LLM_API_KEY=              # Anthropic key (sk-ant-...) OR OpenRouter key (sk-or-...)
+LLM_MODEL=claude-sonnet-4-6           # with OpenRouter: anthropic/claude-sonnet-4.6
+# LLM_BASE_URL=           # optional override; sk-or- keys auto-route to
+                          # https://openrouter.ai/api (Anthropic-compatible /v1/messages)
 WEB_ADMIN_PASSWORD=       # strong random password for the review PWA
 TZ=America/New_York
 PORT=8000

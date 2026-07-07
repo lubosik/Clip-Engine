@@ -35,9 +35,13 @@ class Settings(BaseSettings):
     postiz_api_url: str | None = Field(default=None, alias="POSTIZ_API_URL")
     postiz_api_key: str | None = Field(default=None, alias="POSTIZ_API_KEY")
 
-    # LLM (Anthropic Messages API) — required for ranking
+    # LLM (Anthropic Messages API) — required for ranking.
+    # LLM_BASE_URL is optional: leave unset for api.anthropic.com. OpenRouter
+    # keys (sk-or-...) are auto-routed to https://openrouter.ai/api, which
+    # serves an Anthropic-compatible /v1/messages endpoint.
     llm_api_key: str | None = Field(default=None, alias="LLM_API_KEY")
     llm_model: str | None = Field(default=None, alias="LLM_MODEL")
+    llm_base_url: str | None = Field(default=None, alias="LLM_BASE_URL")
 
     # Storage — defaults to /data/clips; required for any file I/O
     storage_dir: str = Field(default="/data/clips", alias="STORAGE_DIR")
