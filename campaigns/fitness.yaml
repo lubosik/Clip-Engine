@@ -68,7 +68,7 @@ template:
     audio: "keep"           # keep|mute
 
 destinations:
-  postiz_channels: ["tiktok_fitness", "instagram_fitness"]  # may include X channels
+  postiz_channels: ["instagram-standalone", "x"]  # Postiz identifiers; add "tiktok" once connected in Postiz
   schedule:
     posts_per_day: 1
     times: ["17:00"]

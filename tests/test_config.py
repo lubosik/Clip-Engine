@@ -99,8 +99,8 @@ def test_fitness_destinations():
     cfg = load_campaign(FITNESS_YAML, strict_assets=False)
     d = cfg.destinations
 
-    assert "tiktok_fitness" in d.postiz_channels
-    assert "instagram_fitness" in d.postiz_channels
+    assert "instagram-standalone" in d.postiz_channels
+    assert "x" in d.postiz_channels
     assert d.schedule.posts_per_day == 1
     assert "17:00" in d.schedule.times
     assert d.autopost is False

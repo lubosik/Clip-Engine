@@ -332,7 +332,7 @@ class Postiz:
         mapping: dict[str, dict[str, Any]] = {}
         for item in integrations:
             # Index by multiple keys for flexible lookup.
-            for key_field in ("name", "profile", "handle"):
+            for key_field in ("id", "identifier", "name", "profile", "handle"):
                 val: str = item.get(key_field) or ""
                 if val:
                     mapping[val] = item
