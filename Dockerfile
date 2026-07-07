@@ -18,7 +18,7 @@ RUN apt-get update && \
         libsm6 \
         libxext6 \
         libxrender1 \
-        libgl1-mesa-glx \
+        libgl1 \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
