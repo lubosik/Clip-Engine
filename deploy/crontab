@@ -1,0 +1,5 @@
+# Clip Engine crons (UTC). See deploy/crontab.md for rationale.
+# supercronic skips a tick if the previous run of the same job is still going.
+0 14 * * * cd /app && python -m producer.run --all
+*/15 * * * * cd /app && python -m scheduler.schedule
+0 9 * * 1 cd /app && python -m scheduler.analytics

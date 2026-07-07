@@ -101,6 +101,12 @@ app = FastAPI(
 _STATIC_DIR = Path(__file__).parent / "static"
 
 
+@app.get("/healthz", include_in_schema=False)
+def healthz() -> dict[str, str]:
+    """Unauthenticated liveness probe for platform health checks."""
+    return {"status": "ok"}
+
+
 # ---------------------------------------------------------------------------
 # Helper: serialise a SQLAlchemy row to a plain dict
 # ---------------------------------------------------------------------------
