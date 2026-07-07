@@ -112,14 +112,10 @@ def _clip_to_dict(clip: Any, base_url: str = "") -> dict[str, Any]:
         # Relationship may be named source_rel in some model versions.
         src = getattr(clip, "source_rel", None) or getattr(clip, "source", None)
         if src:
-            # Column may be named source_metadata (reserved word fix) or metadata.
-            meta = (
-                getattr(src, "source_metadata", None)
-                or getattr(src, "meta", None)
-                or getattr(src, "metadata", None)
-                or {}
-            )
-            if meta is None:
+            # Column is source_metadata ("metadata" is reserved on DeclarativeBase —
+            # getattr(src, "metadata") would return the ORM MetaData object, not a dict).
+            meta = getattr(src, "source_metadata", None) or getattr(src, "meta", None)
+            if not isinstance(meta, dict):
                 meta = {}
             source_info = {
                 "handle": (
