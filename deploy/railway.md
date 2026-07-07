@@ -7,7 +7,7 @@ Cloud (https://api.postiz.com) with an API key.
 
 | Service    | Source                        | Role |
 |------------|-------------------------------|------|
-| `clip-engine` | GitHub repo, deploy/Dockerfile.all (via railway.json) | Web PWA + API, plus producer/scheduler/analytics crons via supercronic |
+| `clip-engine` | GitHub repo, root Dockerfile (auto-detected by Railway) | Web PWA + API, plus producer/scheduler/analytics crons via supercronic |
 | `postgres` | Railway Postgres plugin       | Database |
 
 Why one app service: Railway volumes attach to exactly ONE service

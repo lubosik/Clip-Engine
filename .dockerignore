@@ -1,0 +1,11 @@
+.git
+.gitignore
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+tests/
+*.md
+!assets/**/*.md
+deploy/Dockerfile.web
+deploy/Dockerfile.worker
