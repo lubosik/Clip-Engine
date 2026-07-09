@@ -36,6 +36,7 @@ COPY pyproject.toml alembic.ini ./
 COPY core/ ./core/
 COPY producer/ ./producer/
 COPY scheduler/ ./scheduler/
+COPY meme/ ./meme/
 COPY web/ ./web/
 COPY campaigns/ ./campaigns/
 COPY assets/ ./assets/
@@ -60,6 +61,9 @@ RUN pip install --no-cache-dir \
     mediapipe \
     python-multipart \
     jinja2 \
+    boto3 \
+    modal \
+    pillow \
     && pip install --no-cache-dir --no-deps -e .
 
 RUN mkdir -p /data/clips/raw /data/clips/clips /data/clips/thumbs /data/clips/logs

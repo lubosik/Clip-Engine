@@ -1,15 +1,17 @@
 /**
- * app.js — Clip Engine PWA entry point.
+ * app.js — Clip Engine PWA entry point (revamp v2).
  *
  * Responsibilities:
- *   - Auth: prompt for password, store as bearer token, re-prompt on 401.
+ *   - Hero video: fetch GET /api/hero (unauthenticated), set video src
+ *     respecting orientation + prefers-reduced-motion + save-data.
+ *     CSS cinematic gradient is the always-present fallback.
+ *   - Light-stream auth animation: kick off SVG path draw after DOMContentLoaded.
+ *   - Auth: password → bearer token, re-prompt on 401, mock bypass.
  *   - Tab routing: Queue / Campaigns / Analytics.
  *   - Toast and bottom-sheet primitives (shared across views).
- *   - Stats polling every 60 s: update tab badge + fire browser notification
- *     if pending count increases.
+ *   - Stats polling every 60 s: update tab badge + fire browser notification.
+ *   - Settings sheet: Mock mode, Notifications, Sign out + compact spend line.
  *   - Service worker registration.
- *   - Mock mode: if a network fetch fails AND localStorage.mock === "1",
- *     substitute fixture data (so the UI can be demoed without a server).
  */
 
 import { api, setToken } from './api.js';
@@ -20,21 +22,23 @@ import { initAnalytics } from './analytics.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const TOKEN_KEY  = 'clipEngineToken';
-const POLL_MS    = 60_000;
-const VIEWS      = ['queue', 'campaigns', 'analytics'];
+const TOKEN_KEY = 'clipEngineToken';
+const POLL_MS   = 60_000;
+const VIEWS     = ['queue', 'campaigns', 'analytics'];
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
-let _activeTab       = 'queue';
-let _pollTimer       = null;
+let _activeTab        = 'queue';
+let _pollTimer        = null;
 let _lastPendingCount = 0;
-let _viewInitialized = { queue: false, campaigns: false, analytics: false };
+let _viewInitialized  = { queue: false, campaigns: false, analytics: false };
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
   _registerSW();
+  _animateLightStream();
+  _initHeroMedia();   // fire-and-forget, non-blocking
 
   const savedToken = localStorage.getItem(TOKEN_KEY) || '';
   if (savedToken) {
@@ -50,8 +54,82 @@ document.addEventListener('DOMContentLoaded', () => {
 function _registerSW() {
   if (!('serviceWorker' in navigator)) return;
   navigator.serviceWorker.register('/sw.js').catch(() => {
-    // Non-fatal — the app still works without a service worker.
+    // Non-fatal — app still works without SW.
   });
+}
+
+// ── Light-stream auth SVG animation ──────────────────────────────────────────
+
+function _animateLightStream() {
+  // Animate stroke-dashoffset from 480 → 0 on all ls-draw-path elements.
+  // CSS @keyframes would need to know the dasharray length; JS is cleaner here.
+  const paths = document.querySelectorAll('.ls-draw-path');
+  if (!paths.length) return;
+
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  if (reduced) {
+    // Just reveal instantly
+    paths.forEach((p) => { p.style.strokeDashoffset = '0'; });
+    return;
+  }
+
+  // Stagger the glow (first path) and sharp line (second path)
+  paths.forEach((path, i) => {
+    const delay = 600 + i * 120;
+    const duration = 1800;
+    const startTime = performance.now() + delay;
+
+    const totalLength = parseFloat(path.getAttribute('stroke-dasharray') || '480');
+    path.style.strokeDashoffset = String(totalLength);
+
+    const tick = (now) => {
+      if (now < startTime) { requestAnimationFrame(tick); return; }
+      const elapsed = now - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      // Ease-out cubic
+      const eased = 1 - Math.pow(1 - progress, 3);
+      path.style.strokeDashoffset = String(totalLength * (1 - eased));
+      if (progress < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
+// ── Hero media ────────────────────────────────────────────────────────────────
+
+async function _initHeroMedia() {
+  // Skip video if user prefers reduced motion or save-data
+  const reduced  = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const saveData = navigator.connection?.saveData === true;
+  if (reduced || saveData) return;
+
+  try {
+    const hero = await api.getHero().catch(() => null);
+    if (!hero) return;
+
+    // Mock mode returns all nulls — CSS backdrop is the intentional fallback.
+    if (!hero.video && !hero.video_vertical) return;
+
+    const isPortrait = window.innerHeight > window.innerWidth;
+    const videoSrc   = (isPortrait && hero.video_vertical) ? hero.video_vertical : (hero.video || hero.video_vertical);
+    const posterSrc  = (isPortrait && hero.poster_mobile) ? hero.poster_mobile : (hero.poster || hero.poster_mobile);
+
+    if (!videoSrc) return;
+
+    const video = document.getElementById('hero-video');
+    if (!video) return;
+
+    if (posterSrc) video.poster = posterSrc;
+
+    video.addEventListener('canplay', () => {
+      video.classList.add('active');
+    }, { once: true });
+
+    video.src = videoSrc;
+    video.load();
+  } catch {
+    // Non-fatal — CSS backdrop is always there.
+  }
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -62,9 +140,9 @@ function _showAuth(message) {
   screen.classList.remove('hidden');
   app.style.display = 'none';
 
-  const errEl  = document.getElementById('auth-error');
-  const inp    = document.getElementById('auth-password');
-  const btn    = document.getElementById('auth-submit');
+  const errEl = document.getElementById('auth-error');
+  const inp   = document.getElementById('auth-password');
+  const btn   = document.getElementById('auth-submit');
 
   if (message) {
     errEl.textContent = message;
@@ -76,6 +154,9 @@ function _showAuth(message) {
   inp.value = '';
   setTimeout(() => inp.focus(), 80);
 
+  // Re-animate light-stream on each auth show (e.g. after logout)
+  _animateLightStream();
+
   const attempt = async () => {
     const pw = inp.value.trim();
     if (!pw) return;
@@ -85,7 +166,6 @@ function _showAuth(message) {
     setToken(pw);
 
     try {
-      // Verify the token with a lightweight request
       await api.getStats();
       localStorage.setItem(TOKEN_KEY, pw);
       _bootApp();
@@ -104,7 +184,7 @@ function _showAuth(message) {
           localStorage.setItem(TOKEN_KEY, pw);
           _bootApp();
         } else {
-          errEl.textContent = 'Could not reach server. Set localStorage.mock="1" for demo mode.';
+          errEl.textContent = 'Could not reach server. Enable Mock mode in Settings to demo offline.';
           errEl.style.display = 'block';
         }
       }
@@ -145,7 +225,10 @@ function _activateTab(tab) {
 
   // Update tab buttons
   document.querySelectorAll('.tab-btn').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.tab === tab);
+    const isActive = btn.dataset.tab === tab;
+    btn.classList.toggle('active', isActive);
+    if (isActive) btn.setAttribute('aria-current', 'page');
+    else btn.removeAttribute('aria-current');
   });
 
   // Show / hide views
@@ -193,6 +276,7 @@ function _makeCtx() {
     closeSheet,
     onBadge: _updateQueueBadge,
     onUnauthorized: _onUnauthorized,
+    goToAnalytics: () => _activateTab('analytics'),
   };
 }
 
@@ -201,7 +285,7 @@ function _makeCtx() {
 /**
  * Try the real API first. If the fetch throws a network error (no .status)
  * AND localStorage.mock === "1", call mockFn() instead.
- * 401 errors always propagate — they mean the server IS running and rejected us.
+ * 401 errors always propagate.
  *
  * @template T
  * @param {() => Promise<T>} fetchFn
@@ -212,14 +296,8 @@ async function mockFetch(fetchFn, mockFn) {
   try {
     return await fetchFn();
   } catch (err) {
-    if (err.status) {
-      // HTTP error from server — propagate (including 401)
-      throw err;
-    }
-    // Network error — use mock if enabled
-    if (localStorage.getItem('mock') === '1') {
-      return mockFn();
-    }
+    if (err.status) throw err;  // HTTP error — propagate (including 401)
+    if (localStorage.getItem('mock') === '1') return mockFn();
     throw err;
   }
 }
@@ -227,7 +305,7 @@ async function mockFetch(fetchFn, mockFn) {
 // ── Stats polling ─────────────────────────────────────────────────────────────
 
 function _startPolling() {
-  _poll();   // immediate first poll
+  _poll();
   _pollTimer = setInterval(_poll, POLL_MS);
 }
 
@@ -241,19 +319,16 @@ async function _poll() {
     const pending = stats.pending ?? 0;
     _updateQueueBadge(pending);
 
-    // Fire notification if pending increased
     if (pending > _lastPendingCount && _lastPendingCount >= 0) {
-      const delta = pending - _lastPendingCount;
-      _maybeNotify(delta);
+      _maybeNotify(pending - _lastPendingCount);
     }
     _lastPendingCount = pending;
 
-    // Refresh queue view silently if it's open
     if (_activeTab === 'queue') {
-      try { refreshQueue(); } catch (_) { /* view may not be mounted yet */ }
+      try { refreshQueue(); } catch { /* view may not be mounted yet */ }
     }
-  } catch (_) {
-    // Polling failures are silent — the main error handling is in the views
+  } catch {
+    // Polling failures are silent — main error handling is in the views.
   }
 }
 
@@ -284,7 +359,7 @@ function _maybeNotify(delta) {
       : `${delta} new clips ready for review`,
     icon: '/icons/icon-192.png',
     badge: '/icons/icon-192.png',
-    tag: 'clip-engine-pending',   // replace previous notification
+    tag: 'clip-engine-pending',
     renotify: true,
   });
 }
@@ -292,7 +367,6 @@ function _maybeNotify(delta) {
 // ── Toast ─────────────────────────────────────────────────────────────────────
 
 /**
- * Show a toast notification.
  * @param {string} message
  * @param {'info'|'success'|'error'|'warning'} [type]
  * @param {number} [duration] ms
@@ -307,7 +381,6 @@ function toast(message, type = 'info', duration = 3500) {
 
   container.appendChild(el);
 
-  // Auto-dismiss
   setTimeout(() => {
     el.style.opacity = '0';
     el.style.transition = 'opacity 0.3s';
@@ -320,7 +393,6 @@ function toast(message, type = 'info', duration = 3500) {
 let _sheetBackdrop = null;
 
 /**
- * Open a bottom sheet.
  * @param {{
  *   title: string,
  *   body: string,
@@ -332,7 +404,7 @@ let _sheetBackdrop = null;
  * }} opts
  */
 function openSheet(opts) {
-  closeSheet();   // ensure clean slate
+  closeSheet();
 
   const backdrop = document.createElement('div');
   backdrop.className = 'sheet-backdrop';
@@ -359,7 +431,6 @@ function openSheet(opts) {
 
   document.body.appendChild(backdrop);
 
-  // Animate in
   requestAnimationFrame(() => {
     requestAnimationFrame(() => backdrop.classList.add('open'));
   });
@@ -391,9 +462,36 @@ document.addEventListener('DOMContentLoaded', () => {
   if (settingsBtn) settingsBtn.addEventListener('click', _openSettings);
 });
 
-function _openSettings() {
-  const mockEnabled  = localStorage.getItem('mock') === '1';
-  const notifStatus  = 'Notification' in window ? Notification.permission : 'unsupported';
+async function _openSettings() {
+  const mockEnabled = localStorage.getItem('mock') === '1';
+  const notifStatus = 'Notification' in window ? Notification.permission : 'unsupported';
+
+  // Fetch spend for compact line (non-blocking fallback)
+  let spendLine = '';
+  try {
+    const spendData = await mockFetch(
+      () => api.getSpend(),
+      () => fixtures.spend
+    );
+    const pct = spendData.month_to_date_usd / spendData.budget_usd;
+    const isWarning = pct >= 0.80;
+    const label = `$${spendData.month_to_date_usd.toFixed(2)} / $${spendData.budget_usd} est. this month`;
+    spendLine = `
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-label">Modal GPU spend</div>
+          <div class="settings-row-sub spend-compact-line${isWarning ? ' warning' : ''}" id="settings-spend-link">
+            ${_esc(label)}${isWarning ? ' ⚠' : ''}
+          </div>
+        </div>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="color:var(--text-3)">
+          <polyline points="9 18 15 12 9 6"/>
+        </svg>
+      </div>`;
+  } catch {
+    // Non-fatal — omit spend line
+  }
 
   openSheet({
     title: 'Settings',
@@ -419,6 +517,7 @@ function _openSettings() {
             ? `<button class="btn btn-secondary btn-sm" id="setting-notif-btn">Enable</button>`
             : `<span class="text-muted text-small">${_esc(notifStatus)}</span>`}
         </div>
+        ${spendLine}
         <div class="settings-row">
           <div>
             <div class="settings-row-label">Sign out</div>
@@ -430,7 +529,6 @@ function _openSettings() {
     primaryLabel: 'Done',
     primaryClass: 'btn-secondary',
     onPrimary: () => {
-      // Save mock toggle
       const mockChk = document.getElementById('setting-mock');
       if (mockChk) {
         if (mockChk.checked) localStorage.setItem('mock', '1');
@@ -440,8 +538,16 @@ function _openSettings() {
     },
   });
 
-  // Wire notification button (outside the primary/secondary flow)
+  // Wire spend link → Analytics tab
   setTimeout(() => {
+    const spendLink = document.getElementById('settings-spend-link');
+    if (spendLink) {
+      spendLink.addEventListener('click', () => {
+        closeSheet();
+        _activateTab('analytics');
+      });
+    }
+
     const notifBtn = document.getElementById('setting-notif-btn');
     if (notifBtn) {
       notifBtn.addEventListener('click', async () => {

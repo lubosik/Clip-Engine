@@ -1,7 +1,7 @@
 /**
  * api.js — Thin API client.
  *
- * Every request sends `Authorization: Bearer <token>`.
+ * Every authenticated request sends `Authorization: Bearer <token>`.
  * A 401 response throws an error with `.status === 401` so the caller
  * (app.js) can re-prompt for the password.
  *
@@ -60,15 +60,23 @@ async function request(method, path, { body, multipart = false } = {}) {
   return res.json();
 }
 
-// ── Public API surface (mirrors ARCHITECTURE.md §5) ──────────────────────────
+// ── Public API surface ────────────────────────────────────────────────────────
 
 export const api = {
+  // Hero media (unauthenticated — called before login)
+  getHero() {
+    return fetch('/api/hero').then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    });
+  },
+
   // Stats (used for empty-state copy + notification badge)
   getStats() {
     return request('GET', '/api/stats');
   },
 
-  // Clips
+  // Clips — gains ?kind=clip|meme filter per contract §6
   getClips(params = {}) {
     const entries = Object.entries(params).filter(([, v]) => v != null && v !== '');
     const qs = entries.length ? '?' + new URLSearchParams(entries).toString() : '';
@@ -94,16 +102,25 @@ export const api = {
   },
 
   getCampaign(name) {
-    return request('GET', `/api/campaigns/${name}`);
+    return request('GET', `/api/campaigns/${encodeURIComponent(name)}`);
   },
 
   createCampaign(formData) {
-    // formData is a FormData instance — do not set Content-Type header
     return request('POST', '/api/campaigns', { body: formData, multipart: true });
   },
 
   updateCampaign(name, formData) {
-    return request('PUT', `/api/campaigns/${name}`, { body: formData, multipart: true });
+    return request('PUT', `/api/campaigns/${encodeURIComponent(name)}`, { body: formData, multipart: true });
+  },
+
+  // PATCH /api/campaigns/{name}/engines  body: {clips?: bool, memes?: bool}
+  patchCampaignEngines(name, body) {
+    return request('PATCH', `/api/campaigns/${encodeURIComponent(name)}/engines`, { body });
+  },
+
+  // PATCH /api/campaigns/{name}/mode  body: {mode}
+  patchCampaignMode(name, mode) {
+    return request('PATCH', `/api/campaigns/${encodeURIComponent(name)}/mode`, { body: { mode } });
   },
 
   // Analytics
@@ -113,8 +130,15 @@ export const api = {
     return request('GET', '/api/analytics' + qs);
   },
 
+  // Modal spend widget — contract §5
+  getSpend(params = {}) {
+    const entries = Object.entries(params).filter(([, v]) => v != null && v !== '');
+    const qs = entries.length ? '?' + new URLSearchParams(entries).toString() : '';
+    return request('GET', '/api/spend' + qs);
+  },
+
   // Manual run trigger
   triggerRun(campaign) {
-    return request('POST', `/api/runs/${campaign}`);
+    return request('POST', `/api/runs/${encodeURIComponent(campaign)}`);
   },
 };

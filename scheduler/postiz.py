@@ -403,11 +403,21 @@ class Postiz:
                 f"Postiz upload limit is 50MB"
             )
 
+        mime_types = {
+            ".mp4": "video/mp4",
+            ".mov": "video/quicktime",
+            ".webm": "video/webm",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+        }
+        mime = mime_types.get(video_path.suffix.lower(), "video/mp4")
+
         with video_path.open("rb") as fh:
             response = self._request(
                 "POST",
                 "/upload",
-                files={"file": (video_path.name, fh, "video/mp4")},
+                files={"file": (video_path.name, fh, mime)},
             )
 
         media_id = response.get("id")

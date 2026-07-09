@@ -25,9 +25,12 @@ import logging
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import yaml as _yaml
 
 from fastapi import (
     Depends,
@@ -39,7 +42,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from sqlalchemy import func as sa_func
@@ -56,12 +59,25 @@ except Exception:
     get_session = None  # type: ignore[assignment]
 
 try:
-    from core.models import Analytics, Campaign, Clip, Source
+    from core.models import Analytics, Campaign, Clip, MemeProfile, RenderJob, Source
 except Exception:
     Analytics = None  # type: ignore[assignment]
     Campaign = None  # type: ignore[assignment]
     Clip = None  # type: ignore[assignment]
+    MemeProfile = None  # type: ignore[assignment]
+    RenderJob = None  # type: ignore[assignment]
     Source = None  # type: ignore[assignment]
+
+try:
+    from core.storage import media_ref_is_r2
+except Exception:
+    def media_ref_is_r2(path: str) -> bool:  # type: ignore[misc]
+        return False
+
+try:
+    from core import r2 as _r2
+except Exception:
+    _r2 = None  # type: ignore[assignment]
 
 try:
     from core.config import load_campaign, load_enabled_campaigns
@@ -112,7 +128,11 @@ def healthz() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 def _clip_to_dict(clip: Any, base_url: str = "") -> dict[str, Any]:
-    """Convert a Clip ORM row to a JSON-serialisable dict per ARCHITECTURE §5."""
+    """Convert a Clip ORM row to a JSON-serialisable dict per ARCHITECTURE §5.
+
+    Gains kind, mode, aspect (revamp v2).  source_id / start / end may be
+    None for meme clips — handled gracefully.
+    """
     source_info: dict[str, Any] = {}
     try:
         # Relationship may be named source_rel in some model versions.
@@ -151,6 +171,12 @@ def _clip_to_dict(clip: Any, base_url: str = "") -> dict[str, Any]:
     return {
         "id": clip_id,
         "campaign": clip.campaign,
+        # Revamp v2 fields
+        "kind": getattr(clip, "kind", "clip"),
+        "mode": getattr(clip, "mode", "production"),
+        "aspect": getattr(clip, "aspect", "9:16"),
+        "meme_meta": getattr(clip, "meme_meta", None),
+        # Core fields
         "hook": clip.hook or "",
         "score": clip.score,
         "reason": clip.reason or "",
@@ -227,6 +253,10 @@ def list_campaigns() -> list[dict[str, Any]]:
         dest = cfg.destinations if hasattr(cfg, "destinations") else cfg.get("destinations", {})
         sched = dest.schedule if hasattr(dest, "schedule") else dest.get("schedule", {})
 
+        ppd = sched.posts_per_day if hasattr(sched, "posts_per_day") else sched.get("posts_per_day", 1)
+        times = sched.times if hasattr(sched, "times") else sched.get("times", [])
+        tz = sched.timezone if hasattr(sched, "timezone") else sched.get("timezone", "UTC")
+
         db_row = campaign_db.get(name)
         last_run_at = None
         if db_row and db_row.updated_at:
@@ -235,14 +265,28 @@ def list_campaigns() -> list[dict[str, Any]]:
                 dt = dt.replace(tzinfo=timezone.utc)
             last_run_at = dt.isoformat()
 
+        # mode and engines from config (revamp v2)
+        cfg_mode = getattr(cfg, "mode", None) or (cfg.get("mode") if isinstance(cfg, dict) else None) or "demo"
+        cfg_engines_obj = getattr(cfg, "engines", None) or (cfg.get("engines") if isinstance(cfg, dict) else None)
+        if cfg_engines_obj is not None:
+            engines = {
+                "clips": getattr(cfg_engines_obj, "clips", True) if not isinstance(cfg_engines_obj, dict) else cfg_engines_obj.get("clips", True),
+                "memes": getattr(cfg_engines_obj, "memes", False) if not isinstance(cfg_engines_obj, dict) else cfg_engines_obj.get("memes", False),
+            }
+        else:
+            engines = {"clips": True, "memes": False}
+
         results.append({
             "name": name,
             "enabled": enabled,
-            "sources_summary": _sources_summary(cfg),
+            "mode": cfg_mode,
+            "engines": engines,
+            "sources_summary": _sources_summary_list(cfg),
             "schedule": {
-                "posts_per_day": sched.posts_per_day if hasattr(sched, "posts_per_day") else sched.get("posts_per_day"),
-                "times": sched.times if hasattr(sched, "times") else sched.get("times", []),
-                "timezone": sched.timezone if hasattr(sched, "timezone") else sched.get("timezone", "UTC"),
+                "posts_per_day": ppd,
+                "times": times,
+                "timezone": tz,
+                "label": _schedule_label(ppd, times, tz),
             },
             "last_run_at": last_run_at,
             "pending_count": pending_counts.get(name, 0),
@@ -251,25 +295,67 @@ def list_campaigns() -> list[dict[str, Any]]:
     return results
 
 
-def _sources_summary(cfg: Any) -> str:
-    """Return a short human-readable summary of sources."""
+def _schedule_label(posts_per_day: int | None, times: list[str], timezone_str: str) -> str:
+    """Format a schedule into a human-readable label.
+
+    Examples:
+        1 post, ["17:00"], "America/New_York" → "1×/day · 17:00 America/New_York"
+        2 posts, ["09:00", "17:00"], "UTC"    → "2×/day · 09:00, 17:00 UTC"
+    """
+    try:
+        ppd = int(posts_per_day or 1)
+        times_str = ", ".join(times) if times else "—"
+        return f"{ppd}×/day · {times_str} {timezone_str}".strip()
+    except Exception:
+        return ""
+
+
+def _sources_summary_list(cfg: Any) -> list[dict[str, Any]]:
+    """Return a list of source summaries per REVAMP_CONTRACTS §6.
+
+    Shape: [{platform, count, label}]
+    Label examples: "YouTube · 3 terms", "TikTok · 2 hashtags"
+    """
+    _PLATFORM_LABELS = {
+        "youtube": "YouTube",
+        "tiktok": "TikTok",
+        "instagram": "Instagram",
+    }
+    result: list[dict[str, Any]] = []
     try:
         sources = cfg.sources if hasattr(cfg, "sources") else cfg.get("sources", {})
-        parts = []
         for platform in ("youtube", "tiktok", "instagram"):
             ps = (
                 getattr(sources, platform, None)
                 or (sources.get(platform) if isinstance(sources, dict) else None)
             )
-            if ps:
-                terms = getattr(ps, "search_terms", None) or (ps.get("search_terms") if isinstance(ps, dict) else None) or []
-                profiles = getattr(ps, "profiles", None) or (ps.get("profiles") if isinstance(ps, dict) else None) or []
-                n = len(terms) + len(profiles)
-                if n:
-                    parts.append(f"{platform}({n})")
-        return ", ".join(parts) if parts else "no sources"
+            if ps is None:
+                continue
+            terms = getattr(ps, "search_terms", None) or (ps.get("search_terms") if isinstance(ps, dict) else None) or []
+            profiles = getattr(ps, "profiles", None) or (ps.get("profiles") if isinstance(ps, dict) else None) or []
+            hashtags = getattr(ps, "hashtags", None) or (ps.get("hashtags") if isinstance(ps, dict) else None) or []
+            channels = getattr(ps, "channels", None) or (ps.get("channels") if isinstance(ps, dict) else None) or []
+
+            count = len(terms) + len(profiles) + len(hashtags) + len(channels)
+            if count == 0:
+                continue
+
+            # Build a descriptive label
+            pieces = []
+            if terms:
+                pieces.append(f"{len(terms)} term{'s' if len(terms) != 1 else ''}")
+            if channels:
+                pieces.append(f"{len(channels)} channel{'s' if len(channels) != 1 else ''}")
+            if profiles:
+                pieces.append(f"{len(profiles)} profile{'s' if len(profiles) != 1 else ''}")
+            if hashtags:
+                pieces.append(f"{len(hashtags)} hashtag{'s' if len(hashtags) != 1 else ''}")
+
+            label = f"{_PLATFORM_LABELS.get(platform, platform.title())} · {', '.join(pieces)}"
+            result.append({"platform": platform, "count": count, "label": label})
     except Exception:
-        return ""
+        pass
+    return result
 
 
 @app.post("/api/campaigns", dependencies=[Depends(require_auth)])
@@ -279,8 +365,16 @@ async def create_campaign(
     corner_badge: UploadFile | None = File(default=None),
     outro: UploadFile | None = File(default=None),
     font: UploadFile | None = File(default=None),
+    meme_refs: list[UploadFile] = File(default=[]),
+    visual_refs: list[UploadFile] = File(default=[]),
 ) -> dict[str, Any]:
-    """POST /api/campaigns — create a new campaign from the wizard."""
+    """POST /api/campaigns — create a new campaign from the wizard.
+
+    Accepts new revamp v2 fields in the config JSON:
+        mode, engines, creative_direction, meme, demo.test_channels
+    Accepts meme_refs as multiple image file uploads (saved to meme_refs dir).
+    In R2 mode, uploads all assets to R2 under campaigns/{name}/assets/.
+    """
     try:
         config_dict: dict[str, Any] = json.loads(config)
     except json.JSONDecodeError as exc:
@@ -299,6 +393,20 @@ async def create_campaign(
     outro_bytes, outro_fn = await _read(outro)
     font_bytes, font_fn = await _read(font)
 
+    # Read meme ref files
+    meme_refs_data: list[tuple[bytes, str]] = []
+    for meme_ref in (meme_refs or []):
+        data = await meme_ref.read()
+        if data:
+            meme_refs_data.append((data, meme_ref.filename or "ref.png"))
+
+    # Read visual reference files (desired clip look — creative guidance)
+    visual_refs_data: list[tuple[bytes, str]] = []
+    for visual_ref in (visual_refs or []):
+        data = await visual_ref.read()
+        if data:
+            visual_refs_data.append((data, visual_ref.filename or "ref.png"))
+
     try:
         slug, yaml_path = create_or_update_campaign(
             config_dict,
@@ -310,6 +418,8 @@ async def create_campaign(
             outro_filename=outro_fn,
             font_bytes=font_bytes,
             font_filename=font_fn,
+            meme_refs_files=meme_refs_data or None,
+            visual_refs_files=visual_refs_data or None,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -341,8 +451,13 @@ async def update_campaign(
     corner_badge: UploadFile | None = File(default=None),
     outro: UploadFile | None = File(default=None),
     font: UploadFile | None = File(default=None),
+    meme_refs: list[UploadFile] = File(default=[]),
+    visual_refs: list[UploadFile] = File(default=[]),
 ) -> dict[str, Any]:
-    """PUT /api/campaigns/{name} — update an existing campaign."""
+    """PUT /api/campaigns/{name} — update an existing campaign.
+
+    Accepts the same new fields as POST /api/campaigns.
+    """
     try:
         config_dict: dict[str, Any] = json.loads(config)
     except json.JSONDecodeError as exc:
@@ -363,6 +478,19 @@ async def update_campaign(
     outro_bytes, outro_fn = await _read(outro)
     font_bytes, font_fn = await _read(font)
 
+    meme_refs_data: list[tuple[bytes, str]] = []
+    for meme_ref in (meme_refs or []):
+        data = await meme_ref.read()
+        if data:
+            meme_refs_data.append((data, meme_ref.filename or "ref.png"))
+
+    # Read visual reference files (desired clip look — creative guidance)
+    visual_refs_data: list[tuple[bytes, str]] = []
+    for visual_ref in (visual_refs or []):
+        data = await visual_ref.read()
+        if data:
+            visual_refs_data.append((data, visual_ref.filename or "ref.png"))
+
     try:
         slug, yaml_path = create_or_update_campaign(
             config_dict,
@@ -374,6 +502,8 @@ async def update_campaign(
             outro_filename=outro_fn,
             font_bytes=font_bytes,
             font_filename=font_fn,
+            meme_refs_files=meme_refs_data or None,
+            visual_refs_files=visual_refs_data or None,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -417,9 +547,261 @@ def get_campaign(name: str) -> dict[str, Any]:
             logger.warning("Could not load campaign %r: %s", name, exc)
 
     # Fallback: raw YAML.
-    import yaml
     with yaml_path.open() as fh:
-        return yaml.safe_load(fh) or {}
+        return _yaml.safe_load(fh) or {}
+
+
+# ---------------------------------------------------------------------------
+# /api/campaigns/{name}/engines  and  /api/campaigns/{name}/mode  (PATCH)
+# ---------------------------------------------------------------------------
+
+def _campaigns_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "campaigns"
+
+
+def _load_campaign_yaml(name: str) -> tuple[str, Path, dict[str, Any]]:
+    """Load a campaign YAML by name.  Returns (slug, path, raw_dict).
+
+    Raises HTTPException 404 if not found.
+    """
+    slug = slugify(name)
+    yaml_path = _campaigns_dir() / f"{slug}.yaml"
+    if not yaml_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail={"error": f"Campaign {name!r} not found", "code": 404},
+        )
+    with yaml_path.open(encoding="utf-8") as fh:
+        raw: dict[str, Any] = _yaml.safe_load(fh) or {}
+    return slug, yaml_path, raw
+
+
+def _write_campaign_yaml(yaml_path: Path, raw: dict[str, Any]) -> None:
+    """Write raw dict back to the YAML file and update DB snapshot if possible."""
+    with yaml_path.open("w", encoding="utf-8") as fh:
+        _yaml.safe_dump(raw, fh, allow_unicode=True, sort_keys=False)
+
+    # Best-effort: update config_snapshot in DB
+    if get_session is not None and Campaign is not None:
+        try:
+            slug = yaml_path.stem
+            with get_session() as session:
+                row = session.query(Campaign).filter(Campaign.name == slug).first()
+                if row is not None:
+                    row.config_snapshot = raw
+                    session.commit()
+        except Exception as exc:
+            logger.warning("Could not update config_snapshot for %s: %s", yaml_path.stem, exc)
+
+
+@app.patch("/api/campaigns/{name}/engines", dependencies=[Depends(require_auth)])
+def patch_campaign_engines(name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """PATCH /api/campaigns/{name}/engines — toggle clip/meme engines on/off.
+
+    Body: {clips?: bool, memes?: bool}
+    Updates the YAML and refreshes Campaign.config_snapshot in the DB.
+    """
+    if not body:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "Request body must include clips or memes", "code": 422},
+        )
+    for key in body:
+        if key not in {"clips", "memes"}:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": f"Unknown engine key {key!r}; expected 'clips' or 'memes'", "code": 422},
+            )
+        if not isinstance(body[key], bool):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": f"Engine value for {key!r} must be a boolean", "code": 422},
+            )
+
+    slug, yaml_path, raw = _load_campaign_yaml(name)
+    engines: dict[str, Any] = dict(raw.get("engines") or {"clips": True, "memes": False})
+    engines.update(body)
+    raw["engines"] = engines
+    _write_campaign_yaml(yaml_path, raw)
+
+    return {"name": slug, "engines": engines}
+
+
+@app.patch("/api/campaigns/{name}/mode", dependencies=[Depends(require_auth)])
+def patch_campaign_mode(name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """PATCH /api/campaigns/{name}/mode — set campaign mode to demo or production.
+
+    Body: {mode: "demo" | "production"}
+    Updates the YAML and refreshes Campaign.config_snapshot in the DB.
+    """
+    new_mode = body.get("mode")
+    if new_mode not in {"demo", "production"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "mode must be 'demo' or 'production'", "code": 422},
+        )
+
+    slug, yaml_path, raw = _load_campaign_yaml(name)
+    raw["mode"] = new_mode
+    _write_campaign_yaml(yaml_path, raw)
+
+    return {"name": slug, "mode": new_mode}
+
+
+# ---------------------------------------------------------------------------
+# /api/spend
+# ---------------------------------------------------------------------------
+
+def _compute_spend_data(session: Any, months: int) -> dict[str, Any]:
+    """Aggregate render_jobs into the spend response shape.
+
+    Extracted as a standalone function so it can be unit-tested directly
+    with an in-memory SQLite session.
+    """
+    from core.settings import get_settings
+
+    budget_usd: float = get_settings().modal_monthly_budget
+
+    since = datetime.now(timezone.utc) - timedelta(days=30 * months)
+
+    jobs = (
+        session.query(RenderJob)
+        .filter(RenderJob.created_at >= since, RenderJob.status == "ok")
+        .all()
+    )
+
+    mtd: float = sum(float(j.cost_estimate or 0) for j in jobs)
+    remaining: float = max(0.0, budget_usd - mtd)
+
+    # Aggregate by campaign
+    by_campaign_raw: dict[str, dict[str, Any]] = {}
+    for j in jobs:
+        entry = by_campaign_raw.setdefault(j.campaign, {"campaign": j.campaign, "usd": 0.0, "jobs": 0})
+        entry["usd"] += float(j.cost_estimate or 0)
+        entry["jobs"] += 1
+
+    # Round per-campaign USD
+    by_campaign = [
+        {**v, "usd": round(v["usd"], 6)}
+        for v in sorted(by_campaign_raw.values(), key=lambda x: x["usd"], reverse=True)
+    ]
+
+    # Most recent 20 jobs (any status)
+    recent_rows = (
+        session.query(RenderJob)
+        .order_by(RenderJob.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    recent: list[dict[str, Any]] = []
+    for j in recent_rows:
+        created_str = j.created_at
+        if isinstance(created_str, datetime):
+            if created_str.tzinfo is None:
+                created_str = created_str.replace(tzinfo=timezone.utc)
+            created_str = created_str.isoformat()
+        recent.append({
+            "clip_id": j.clip_id,
+            "campaign": j.campaign,
+            "gpu": j.gpu,
+            "duration_s": j.duration_s,
+            "usd": round(float(j.cost_estimate or 0), 6),
+            "created_at": created_str,
+        })
+
+    return {
+        "estimated": True,
+        "budget_usd": budget_usd,
+        "month_to_date_usd": round(mtd, 6),
+        "remaining_credit_usd": round(remaining, 6),
+        "by_campaign": by_campaign,
+        "recent": recent,
+        "plan_note": (
+            "Costs are estimates derived from recorded wall-clock duration × "
+            "published Modal GPU rates (modal.com/pricing, verified 2026-07-08). "
+            "Modal's billing API requires a Team or Enterprise plan — these "
+            "figures are not reconciled against actual billing."
+        ),
+    }
+
+
+@app.get("/api/spend", dependencies=[Depends(require_auth)])
+def get_spend(months: int = Query(default=1, ge=1, le=12)) -> dict[str, Any]:
+    """GET /api/spend?months=N — Modal spend summary from render_jobs ledger.
+
+    Returns estimated costs; actual billing requires a Modal Team/Enterprise plan.
+    """
+    _db_required()
+
+    if RenderJob is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "render_jobs table not available", "code": 503},
+        )
+
+    try:
+        with get_session() as session:
+            return _compute_spend_data(session, months)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("get_spend failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Spend query failed", "code": 500},
+        )
+
+
+# ---------------------------------------------------------------------------
+# /api/hero  (unauthenticated — login page uses this before the user logs in)
+# ---------------------------------------------------------------------------
+
+# Simple in-process cache for the R2 existence check (~10 min TTL)
+_hero_cache: dict[str, Any] = {}
+_hero_cache_ts: float = 0.0
+_HERO_CACHE_TTL: float = 600.0  # 10 minutes
+
+_HERO_KEYS = {
+    "video": "hero/hero_loop.mp4",
+    "video_vertical": "hero/hero_loop_vertical.mp4",
+    "poster": "hero/hero_poster_web.jpg",
+    "poster_mobile": "hero/hero_poster_mobile.jpg",
+}
+
+
+@app.get("/api/hero", include_in_schema=True)
+def get_hero() -> dict[str, Any]:
+    """GET /api/hero — presigned URLs for hero assets (login page background).
+
+    No auth required — the login page calls this before the user has a token.
+    If R2 is enabled and the hero objects exist, returns presigned URLs.
+    Otherwise returns null values and the frontend falls back to a CSS backdrop.
+
+    Results are cached for 10 minutes to avoid hammering R2 HeadObject.
+    """
+    global _hero_cache, _hero_cache_ts
+
+    now = time.monotonic()
+    if _hero_cache and (now - _hero_cache_ts) < _HERO_CACHE_TTL:
+        return _hero_cache
+
+    result: dict[str, Any] = {k: None for k in _HERO_KEYS}
+
+    try:
+        from core.settings import get_settings as _gs
+        if _gs().r2_enabled and _r2 is not None:
+            for field, key in _HERO_KEYS.items():
+                try:
+                    if _r2.exists(key):
+                        result[field] = _r2.presign(key)
+                except Exception as exc:
+                    logger.debug("Hero R2 check failed for key=%s: %s", key, exc)
+    except Exception as exc:
+        logger.debug("get_hero failed: %s", exc)
+
+    _hero_cache = result
+    _hero_cache_ts = now
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -430,11 +812,21 @@ def get_campaign(name: str) -> dict[str, Any]:
 def list_clips(
     status_filter: str | None = Query(default=None, alias="status"),
     campaign: str | None = Query(default=None),
+    kind: str | None = Query(default=None, description="Filter by kind: 'clip' or 'meme'"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
-    """GET /api/clips — paginated clip list with optional filters."""
+    """GET /api/clips — paginated clip list with optional filters.
+
+    Supports ?kind=clip|meme to filter by content type (revamp v2).
+    """
     _db_required()
+
+    if kind is not None and kind not in {"clip", "meme"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "kind must be 'clip' or 'meme'", "code": 422},
+        )
 
     try:
         with get_session() as session:
@@ -443,9 +835,13 @@ def list_clips(
                 q = q.filter(Clip.status == status_filter)
             if campaign:
                 q = q.filter(Clip.campaign == campaign)
+            if kind is not None and Clip is not None and hasattr(Clip, "kind"):
+                q = q.filter(Clip.kind == kind)
             q = q.order_by(Clip.created_at.desc()).offset(offset).limit(limit)
             clips = q.all()
             return [_clip_to_dict(c) for c in clips]
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("list_clips failed: %s", exc, exc_info=True)
         raise HTTPException(
@@ -455,10 +851,12 @@ def list_clips(
 
 
 @app.get("/api/clips/{clip_id}/video", dependencies=[Depends(require_auth)])
-def get_clip_video(clip_id: str) -> FileResponse:
-    """GET /api/clips/{id}/video — serve mp4 with HTTP Range support.
+def get_clip_video(clip_id: str) -> Any:
+    """GET /api/clips/{id}/video — serve mp4 or redirect to presigned R2 URL.
 
-    starlette's FileResponse handles Range headers natively.
+    When file_path starts with 'r2://', returns a 307 redirect to a presigned
+    URL so the browser streams directly from R2.  Otherwise streams from disk
+    (starlette FileResponse handles Range headers natively).
     """
     _db_required()
 
@@ -479,6 +877,20 @@ def get_clip_video(clip_id: str) -> FileResponse:
             status_code=404,
             detail={"error": "Clip has no video file", "code": 404},
         )
+
+    # R2 path: redirect to presigned URL
+    if media_ref_is_r2(clip.file_path) and _r2 is not None:
+        try:
+            key = clip.file_path.removeprefix("r2://")
+            url = _r2.presign(key)
+            return RedirectResponse(url=url, status_code=307)
+        except Exception as exc:
+            logger.error("R2 presign failed for clip=%s: %s", clip_id, exc)
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "Failed to generate video URL", "code": 502},
+            )
+
     video_path = Path(clip.file_path)
     if not video_path.exists():
         raise HTTPException(
@@ -494,8 +906,12 @@ def get_clip_video(clip_id: str) -> FileResponse:
 
 
 @app.get("/api/clips/{clip_id}/thumb", dependencies=[Depends(require_auth)])
-def get_clip_thumb(clip_id: str) -> FileResponse:
-    """GET /api/clips/{id}/thumb — serve thumbnail jpeg."""
+def get_clip_thumb(clip_id: str) -> Any:
+    """GET /api/clips/{id}/thumb — serve thumbnail or redirect to presigned R2 URL.
+
+    When thumb_path starts with 'r2://', returns a 307 redirect to a presigned
+    URL.  Otherwise serves the local file.
+    """
     _db_required()
 
     try:
@@ -511,11 +927,25 @@ def get_clip_thumb(clip_id: str) -> FileResponse:
             detail={"error": f"Clip {clip_id} not found", "code": 404},
         )
 
+    # R2 thumb path
+    if hasattr(clip, "thumb_path") and clip.thumb_path and media_ref_is_r2(clip.thumb_path):
+        if _r2 is not None:
+            try:
+                key = clip.thumb_path.removeprefix("r2://")
+                url = _r2.presign(key)
+                return RedirectResponse(url=url, status_code=307)
+            except Exception as exc:
+                logger.error("R2 presign for thumb failed clip=%s: %s", clip_id, exc)
+                raise HTTPException(
+                    status_code=502,
+                    detail={"error": "Failed to generate thumbnail URL", "code": 502},
+                )
+
     # Derive thumb path from file_path if not stored separately.
     thumb_path: Path | None = None
     if hasattr(clip, "thumb_path") and clip.thumb_path:
         thumb_path = Path(clip.thumb_path)
-    elif clip.file_path:
+    elif clip.file_path and not media_ref_is_r2(clip.file_path):
         # Convention: same directory, same stem, .jpg extension.
         fp = Path(clip.file_path)
         thumb_path = fp.parent / f"{fp.stem}_thumb.jpg"

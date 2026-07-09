@@ -225,17 +225,70 @@ class AnalyticsConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Sub-models — revamp v2 additions (all optional with defaults)
+# ---------------------------------------------------------------------------
+
+class EnginesConfig(BaseModel):
+    """Controls which content engines are active for a campaign."""
+
+    clips: bool = True
+    memes: bool = False
+
+
+class MemeConfig(BaseModel):
+    """Meme engine configuration (required only when engines.memes is True).
+
+    All fields have safe defaults so the model can be instantiated without
+    raising even when memes are disabled — this avoids brittle conditional logic
+    in the loader.
+    """
+
+    # Local directory holding reference meme images; relative to project root
+    refs_dir: str = ""
+    # Override for the image generation model (falls back to MEME_IMAGE_MODEL env)
+    image_model: str = ""
+    # Campaign-specific hard rules merged with the global defaults:
+    #   - no em-dashes
+    #   - no medical/health claims
+    #   - no unsafe dieting / disordered eating content
+    hard_rules: list[str] = Field(default_factory=list)
+
+
+class DemoConfig(BaseModel):
+    """Demo-mode settings (optional; demo items can still post to real channels)."""
+
+    # Postiz channel IDs to use when posting demo items instead of live channels
+    test_channels: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # Top-level campaign config
 # ---------------------------------------------------------------------------
 
 class CampaignConfig(BaseModel):
     name: str
     enabled: bool = True
+    # demo | production — default mode for runs and clips created by this campaign
+    mode: str = "demo"
+    engines: EnginesConfig = Field(default_factory=EnginesConfig)
+    # Free-text brief fed into ranking + render guidance; optional
+    creative_direction: str = ""
+    # Meme engine config — only required when engines.memes is True
+    meme: MemeConfig | None = None
+    # Demo-mode overrides — optional
+    demo: DemoConfig | None = None
     sources: SourcesConfig
     ranking: RankingConfig
     template: TemplateConfig
     destinations: DestinationsConfig
     analytics: AnalyticsConfig
+
+    @field_validator("mode")
+    @classmethod
+    def _valid_mode(cls, v: str) -> str:
+        if v not in {"demo", "production"}:
+            raise ValueError(f"mode must be 'demo' or 'production', got {v!r}")
+        return v
 
     # Populated by load_campaign — not in the YAML
     _yaml_path: Path | None = None

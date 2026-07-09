@@ -95,3 +95,43 @@ def cleanup_work(source_id: str) -> None:
                 "Failed to clean work dir",
                 extra={"path": str(d), "error": str(exc)},
             )
+
+
+# ---------------------------------------------------------------------------
+# R2 reference helpers — key scheme per REVAMP_CONTRACTS §3
+# These functions produce R2 object keys; they do NOT make any network call.
+# ---------------------------------------------------------------------------
+
+def media_ref_is_r2(path: str) -> bool:
+    """Return True when *path* is an R2 reference (starts with 'r2://')."""
+    return path.startswith("r2://")
+
+
+def r2_key_for_clip(campaign: str, clip_id: int | str) -> str:
+    """R2 key for a finished rendered clip mp4."""
+    return f"campaigns/{campaign}/clips/{clip_id}.mp4"
+
+
+def r2_key_for_thumb(campaign: str, clip_id: int | str) -> str:
+    """R2 key for a clip thumbnail jpeg."""
+    return f"campaigns/{campaign}/thumbs/{clip_id}.jpg"
+
+
+def r2_key_for_meme(campaign: str, clip_id: int | str) -> str:
+    """R2 key for a rendered meme image (1:1 or 4:5 png)."""
+    return f"campaigns/{campaign}/memes/{clip_id}.png"
+
+
+def r2_key_for_asset(campaign: str, filename: str) -> str:
+    """R2 key for a campaign asset (logo, font, outro, badge, etc.)."""
+    return f"campaigns/{campaign}/assets/{filename}"
+
+
+def r2_key_for_raw(campaign: str, source_id: str) -> str:
+    """R2 key for a raw source video download.
+
+    source_id may contain ':' or '/' — these are replaced with '_' to
+    produce a valid object key component.
+    """
+    safe_id = source_id.replace(":", "_").replace("/", "_")
+    return f"campaigns/{campaign}/raw/{safe_id}.mp4"

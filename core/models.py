@@ -141,11 +141,20 @@ class Clip(Base):
     campaign: Mapped[str] = mapped_column(
         String(128), ForeignKey("campaigns.name", ondelete="CASCADE"), nullable=False
     )
-    source_id: Mapped[str] = mapped_column(
-        String(512), ForeignKey("sources.source_id", ondelete="CASCADE"), nullable=False
+    # Nullable — memes have no source video (migration 002)
+    source_id: Mapped[str | None] = mapped_column(
+        String(512), ForeignKey("sources.source_id", ondelete="CASCADE"), nullable=True
     )
-    start: Mapped[float] = mapped_column(Float, nullable=False)
-    end: Mapped[float] = mapped_column(Float, nullable=False)
+    start: Mapped[float | None] = mapped_column(Float, nullable=True)
+    end: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 'clip' | 'meme' — identifies content type (migration 002)
+    kind: Mapped[str] = mapped_column(String(8), nullable=False, default="clip")
+    # 'demo' | 'production' — stamped at creation from campaign mode (migration 002)
+    mode: Mapped[str] = mapped_column(String(12), nullable=False, default="production")
+    # '9:16' | '1:1' | '4:5' — aspect ratio of rendered output (migration 002)
+    aspect: Mapped[str] = mapped_column(String(8), nullable=False, default="9:16")
+    # For memes: {concept, classifier_scores, profile_version} (migration 002)
+    meme_meta: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     hook: Mapped[str | None] = mapped_column(Text, nullable=True)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -170,12 +179,14 @@ class Clip(Base):
     )
 
     campaign_rel: Mapped[Campaign] = relationship("Campaign", back_populates="clips")
-    source_rel: Mapped[Source] = relationship("Source", back_populates="clips")
+    # Optional because meme clips have no source (source_id is NULL)
+    source_rel: Mapped[Source | None] = relationship("Source", back_populates="clips")
     analytics: Mapped[list[Analytics]] = relationship("Analytics", back_populates="clip_rel")
 
     __table_args__ = (
         Index("ix_clips_status", "status"),
         Index("ix_clips_campaign", "campaign"),
+        Index("ix_clips_kind", "kind"),
     )
 
 
@@ -232,4 +243,77 @@ class Analytics(Base):
     __table_args__ = (
         Index("ix_analytics_clip_id", "clip_id"),
         Index("ix_analytics_clip_platform", "clip_id", "platform"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# render_jobs — Modal spend ledger (migration 002)
+# ---------------------------------------------------------------------------
+
+class RenderJob(Base):
+    """One row per render invocation (Modal or local ffmpeg fallback).
+
+    Powers the /api/spend endpoint and the --max-modal-spend producer guard.
+    Costs are estimates based on recorded wall-clock duration × published rate.
+    """
+
+    __tablename__ = "render_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # NULL when clip was deleted or for test/healthcheck jobs
+    clip_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("clips.id", ondelete="SET NULL"), nullable=True
+    )
+    campaign: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 'modal' | 'local'
+    backend: Mapped[str] = mapped_column(String(32), nullable=False)
+    # GPU type returned by Modal ('l4', 't4', 'a10g', 'any', …); NULL for local
+    gpu: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    duration_s: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    rate_per_s: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    cost_estimate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # 'ok' | 'error'
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_render_jobs_campaign", "campaign"),
+        Index("ix_render_jobs_created_at", "created_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# meme_profiles — versioned meme style profiles (migration 002)
+# ---------------------------------------------------------------------------
+
+class MemeProfile(Base):
+    """Extracted meme style profile for a campaign.
+
+    New versions are created by the weekly feedback loop (meme/feedback.py).
+    The active profile is the row with the highest version for a given campaign.
+    """
+
+    __tablename__ = "meme_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    campaign: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Extracted style profile dict: {visual_format, caption_voice, rules, confidence}
+    profile: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("campaign", "version", name="uq_meme_profiles_campaign_version"),
+        Index("ix_meme_profiles_campaign", "campaign"),
     )

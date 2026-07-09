@@ -23,19 +23,9 @@ alembic.ini.local
 storage/
 /data/
 
-# Assets — actual media files (logo, outro, font) are not committed
-# The assets/<campaign>/ directories contain .gitkeep and README only
-assets/**/media/
-assets/**/*.png
-assets/**/*.jpg
-assets/**/*.jpeg
-assets/**/*.mov
-assets/**/*.mp4
-assets/**/*.ttf
-assets/**/*.otf
-# Exception: allow the fitness README and .gitkeep
-!assets/fitness/README.md
-!assets/fitness/.gitkeep
+# Assets — campaign media (logo, outro, font) IS committed: the Docker image
+# bakes assets/ in at build time, so Railway needs them in the repo.
+# Wizard-created campaign assets live on the volume (see deploy/start.sh).
 
 # IDE
 .vscode/

@@ -201,6 +201,103 @@ def patch_template_paths(config: dict[str, Any], slug: str) -> dict[str, Any]:
     return config
 
 
+def save_meme_refs(
+    slug: str,
+    files: list[tuple[bytes, str]],
+) -> Path:
+    """Save meme reference images to campaigns/<slug>/meme_refs/.
+
+    Args:
+        slug:  Campaign slug (validated).
+        files: List of (bytes, original_filename) pairs.
+
+    Returns:
+        Path of the meme_refs directory.
+    """
+    _assert_safe_slug(slug)
+    refs_dir = _PROJECT_ROOT / "campaigns" / slug / "meme_refs"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+
+    for data, filename in files:
+        # Sanitise filename — allow only safe characters
+        safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(filename).name)
+        if not safe_name:
+            safe_name = "ref.png"
+        out = refs_dir / safe_name
+        out.write_bytes(data)
+        logger.info("Meme ref saved: path=%s size=%d bytes", out, len(data))
+
+    return refs_dir
+
+
+def save_visual_refs(
+    slug: str,
+    files: list[tuple[bytes, str]],
+) -> Path:
+    """Save visual reference images (desired clip look) to campaigns/<slug>/visual_refs/.
+
+    These are passed to render/ranking as creative guidance (MASTER_SPEC Part L).
+
+    Args:
+        slug:  Campaign slug (validated).
+        files: List of (bytes, original_filename) pairs.
+
+    Returns:
+        Path of the visual_refs directory.
+    """
+    _assert_safe_slug(slug)
+    refs_dir = _PROJECT_ROOT / "campaigns" / slug / "visual_refs"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+
+    for data, filename in files:
+        safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(filename).name)
+        if not safe_name:
+            safe_name = "ref.png"
+        out = refs_dir / safe_name
+        out.write_bytes(data)
+        logger.info("Visual ref saved: path=%s size=%d bytes", out, len(data))
+
+    return refs_dir
+
+
+def _upload_assets_to_r2(slug: str) -> None:
+    """Upload all saved assets for *slug* to R2 under campaigns/{slug}/assets/.
+
+    Best-effort: logs errors but does not raise so that a failed R2 upload
+    does not block the local save.
+    """
+    try:
+        from core.settings import get_settings
+        from core.r2 import upload_file as r2_upload
+        from core.storage import r2_key_for_asset
+
+        if not get_settings().r2_enabled:
+            return
+
+        asset_dir = _assets_dir(slug)
+        if not asset_dir.exists():
+            return
+
+        for asset_file in asset_dir.iterdir():
+            if not asset_file.is_file():
+                continue
+            key = r2_key_for_asset(slug, asset_file.name)
+            try:
+                r2_upload(asset_file, key)
+                logger.info("Asset uploaded to R2: key=%s", key)
+            except Exception as exc:
+                logger.error(
+                    "R2 asset upload failed (local copy still saved): "
+                    "key=%s error=%s",
+                    key,
+                    exc,
+                )
+    except ImportError:
+        pass  # core.r2 not available — skip silently
+    except Exception as exc:
+        logger.error("_upload_assets_to_r2 failed for slug=%s: %s", slug, exc)
+
+
 def create_or_update_campaign(
     config: dict[str, Any],
     *,
@@ -212,15 +309,41 @@ def create_or_update_campaign(
     outro_filename: str = "",
     font_bytes: bytes | None = None,
     font_filename: str = "",
+    meme_refs_files: list[tuple[bytes, str]] | None = None,
+    visual_refs_files: list[tuple[bytes, str]] | None = None,
 ) -> tuple[str, Path]:
     """High-level: validate, save assets, patch paths, write YAML.
+
+    New fields accepted in *config* (all optional, handled transparently):
+        mode              — 'demo' | 'production'
+        engines           — {clips, memes}
+        creative_direction — free-text brief string
+        meme              — {refs_dir, image_model, hard_rules}
+        demo              — {test_channels}
+        template.watermark — placement / opacity accepted as-is
+        template.hook.show_seconds — accepted as-is
+
+    Args:
+        config:           Campaign config dict (validated against schema).
+        logo_bytes:       Raw bytes of logo image upload, or None.
+        logo_filename:    Original filename of logo upload.
+        corner_badge_bytes: Raw bytes of corner badge upload, or None.
+        corner_badge_filename: Original filename of corner badge upload.
+        outro_bytes:      Raw bytes of outro video upload, or None.
+        outro_filename:   Original filename of outro video upload.
+        font_bytes:       Raw bytes of caption font upload, or None.
+        font_filename:    Original filename of font upload.
+        meme_refs_files:  List of (bytes, filename) pairs for meme reference
+                          images.  Saved to campaigns/<slug>/meme_refs/.
+        visual_refs_files: List of (bytes, filename) pairs for visual reference
+                          images (desired clip look).  Saved to
+                          campaigns/<slug>/visual_refs/.
 
     Returns:
         (slug, yaml_path) tuple.
 
     Raises:
-        ValueError: on invalid slug or unknown asset type.
-        pydantic.ValidationError: if core is available and config is invalid.
+        ValueError: on invalid slug, unknown asset type, or schema violation.
     """
     raw_name: str = config.get("name", "")
     if not raw_name:
@@ -232,7 +355,7 @@ def create_or_update_campaign(
     # Normalise name to slug in the config.
     config = dict(config, name=slug)
 
-    # Save asset files if provided.
+    # Save standard asset files if provided.
     asset_map = [
         ("logo", logo_bytes, logo_filename),
         ("corner_badge", corner_badge_bytes, corner_badge_filename),
@@ -242,6 +365,18 @@ def create_or_update_campaign(
     for asset_type, data, original_filename in asset_map:
         if data:
             save_asset(slug, asset_type, data, original_filename=original_filename)
+
+    # Save meme reference images and update refs_dir in config.
+    if meme_refs_files:
+        refs_dir = save_meme_refs(slug, meme_refs_files)
+        # Ensure meme.refs_dir points at the saved location (relative to project root).
+        meme_block = dict(config.get("meme") or {})
+        meme_block["refs_dir"] = f"campaigns/{slug}/meme_refs"
+        config = dict(config, meme=meme_block)
+
+    # Save visual reference images (creative guidance for render/ranking).
+    if visual_refs_files:
+        save_visual_refs(slug, visual_refs_files)
 
     # Patch template paths to point at the saved asset locations.
     config = patch_template_paths(config, slug)
@@ -255,4 +390,8 @@ def create_or_update_campaign(
         raise ValueError(f"Campaign config validation failed: {exc}") from exc
 
     yaml_path = write_campaign_yaml(slug, config)
+
+    # Best-effort: upload assets to R2 when configured.
+    _upload_assets_to_r2(slug)
+
     return slug, yaml_path

@@ -26,6 +26,8 @@ dependencies = [
     "pillow",
     "python-multipart",
     "jinja2",
+    "boto3",
+    "modal",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +43,7 @@ include = [
     "producer*",
     "scheduler*",
     "web*",
+    "meme*",
 ]
 
 [tool.pytest.ini_options]

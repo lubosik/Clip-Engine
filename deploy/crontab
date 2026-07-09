@@ -3,3 +3,6 @@
 0 14 * * * cd /app && python -m producer.run --all
 */15 * * * * cd /app && python -m scheduler.schedule
 0 9 * * 1 cd /app && python -m scheduler.analytics
+# Meme engine — runs daily at 14:30 UTC after the clip producer.
+# Guard: meme.run only acts when a campaign has engines.memes: true.
+30 14 * * * cd /app && python -m meme.run --all >> /data/clips/logs/meme.log 2>&1

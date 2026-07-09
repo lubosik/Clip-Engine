@@ -21,6 +21,20 @@ case "${DATABASE_URL:-}" in
     ;;
 esac
 
+# Persist campaigns/ and assets/ on the volume so wizard-created campaigns
+# survive redeploys. Baked-in defaults are copied over on first boot (without
+# clobbering volume edits), then /app paths become symlinks into the volume.
+if [ -n "${STORAGE_DIR:-}" ] && [ -d "${STORAGE_DIR}" ]; then
+  for dir in campaigns assets; do
+    mkdir -p "${STORAGE_DIR}/${dir}"
+    if [ -d "/app/${dir}" ] && [ ! -L "/app/${dir}" ]; then
+      cp -rn "/app/${dir}/." "${STORAGE_DIR}/${dir}/" 2>/dev/null || true
+      rm -rf "/app/${dir}"
+    fi
+    ln -sfn "${STORAGE_DIR}/${dir}" "/app/${dir}"
+  done
+fi
+
 attempt=0
 until alembic upgrade head; do
   attempt=$((attempt + 1))

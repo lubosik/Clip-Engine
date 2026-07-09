@@ -1,4 +1,4 @@
-/* Clip Engine — Service Worker
+/* Clip Engine — Service Worker v3 (revamp)
  *
  * Strategy:
  *   - Static shell assets: cache-first (install precache, serve from cache, update in background)
@@ -6,7 +6,7 @@
  *   - clip video + thumb endpoints: network-only
  */
 
-const CACHE_NAME = 'clip-engine-static-v2';
+const CACHE_NAME = 'clip-engine-static-v3';
 
 const PRECACHE = [
   '/',
@@ -73,12 +73,11 @@ self.addEventListener('fetch', (event) => {
     caches.match(event.request).then((cached) => {
       if (cached) {
         // Serve from cache; revalidate in background.
-        const revalidate = fetch(event.request)
+        fetch(event.request)
           .then((fresh) => {
             if (fresh && fresh.ok) {
               caches.open(CACHE_NAME).then((c) => c.put(event.request, fresh.clone()));
             }
-            return fresh;
           })
           .catch(() => {/* offline — cache already served */});
         return cached;

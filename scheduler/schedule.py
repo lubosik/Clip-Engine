@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import sys
+import tempfile
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -259,23 +260,48 @@ def _process_clip(
         )
         return
 
-    video_path = Path(clip.file_path) if clip.file_path else None
-    if not video_path or not video_path.exists():
-        logger.warning(
-            "Video file missing for clip %s: %s — skipping",
-            clip.id,
-            clip.file_path,
-        )
+    video_path, video_is_temp = _resolve_video_path(clip)
+    if video_path is None:
         return
+    try:
+        _schedule_resolved_clip(clip, cfg, video_path, postiz, dry_run)
+    finally:
+        if video_is_temp:
+            video_path.unlink(missing_ok=True)
 
+
+def _schedule_resolved_clip(clip, cfg, video_path: Path, postiz, dry_run: bool) -> None:
+    """Schedule *clip* (with a locally-available *video_path*) across its channels."""
     dest = cfg.destinations if hasattr(cfg, "destinations") else cfg["destinations"]
-    channels: list[str] = (
-        dest.postiz_channels
-        if hasattr(dest, "postiz_channels")
-        else dest["postiz_channels"]
-    )
+
+    # Demo mode routing: when clip.mode='demo' and campaign has test_channels,
+    # post to test_channels instead of the live postiz_channels.
+    # The 'demo' label is NEVER burned into the video — it is dashboard-only.
+    clip_mode: str = getattr(clip, "mode", "production") or "production"
+    demo_cfg = getattr(cfg, "demo", None)
+    test_channels: list[str] = []
+    if demo_cfg is not None:
+        test_channels = getattr(demo_cfg, "test_channels", []) or []
+
+    if clip_mode == "demo" and test_channels:
+        channels = test_channels
+        logger.info(
+            "Demo routing: clip %s → test_channels %s (mode='demo')",
+            clip.id, test_channels,
+        )
+    else:
+        channels = (
+            dest.postiz_channels
+            if hasattr(dest, "postiz_channels")
+            else dest["postiz_channels"]
+        )
+
     autopost: bool = dest.autopost if hasattr(dest, "autopost") else dest.get("autopost", False)
-    draft = not autopost
+    # Demo clips post as drafts unless autopost is explicitly enabled
+    if clip_mode == "demo":
+        draft = True
+    else:
+        draft = not autopost
 
     caption = _render_caption(cfg, clip)
 
@@ -338,6 +364,47 @@ def _process_clip(
     if new_post_ids and not dry_run:
         _persist_scheduled(clip, new_post_ids, scheduled_at)
 
+
+def _resolve_video_path(clip) -> tuple[Path | None, bool]:
+    """Resolve clip.file_path to a local file, downloading from R2 if needed.
+
+    Returns (path, is_temp). is_temp=True means the caller must delete the
+    file after use (it was fetched from R2 into a temporary location).
+    """
+    if not clip.file_path:
+        logger.warning("Clip %s has no file_path — skipping", clip.id)
+        return None, False
+
+    from core.storage import media_ref_is_r2
+
+    if media_ref_is_r2(clip.file_path):
+        key = clip.file_path[len("r2://"):]
+        suffix = Path(key).suffix or ".mp4"
+        tmp = Path(tempfile.gettempdir()) / f"clip-engine-post-{clip.id}{suffix}"
+        try:
+            from core import r2
+
+            r2.download_file(key, tmp)
+        except Exception as exc:
+            logger.warning(
+                "Failed to download %s from R2 for clip %s: %s — skipping",
+                clip.file_path,
+                clip.id,
+                exc,
+            )
+            tmp.unlink(missing_ok=True)
+            return None, False
+        return tmp, True
+
+    video_path = Path(clip.file_path)
+    if not video_path.exists():
+        logger.warning(
+            "Video file missing for clip %s: %s — skipping",
+            clip.id,
+            clip.file_path,
+        )
+        return None, False
+    return video_path, False
 
 
 def _load_taken_slots(campaign: str) -> list[datetime]:

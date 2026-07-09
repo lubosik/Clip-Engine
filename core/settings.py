@@ -52,6 +52,40 @@ class Settings(BaseSettings):
     # Timezone
     tz: str = Field(default="America/New_York", alias="TZ")
 
+    # Cloudflare R2 (S3-compatible) — optional; enables R2 storage mode
+    # Endpoint value (non-secret): https://<account_id>.r2.cloudflarestorage.com
+    r2_account_id: str | None = Field(default=None, alias="R2_ACCOUNT_ID")
+    r2_access_key_id: str | None = Field(default=None, alias="R2_ACCESS_KEY_ID")
+    r2_secret_access_key: str | None = Field(default=None, alias="R2_SECRET_ACCESS_KEY")
+    r2_bucket: str | None = Field(default=None, alias="R2_BUCKET")
+    r2_endpoint: str | None = Field(default=None, alias="R2_ENDPOINT")
+
+    # Modal serverless GPU rendering — optional; enables cloud render path
+    modal_token_id: str | None = Field(default=None, alias="MODAL_TOKEN_ID")
+    modal_token_secret: str | None = Field(default=None, alias="MODAL_TOKEN_SECRET")
+    # 'auto' selects Modal when credentials are present; 'modal' forces it;
+    # 'local' forces local ffmpeg even when Modal credentials are present.
+    render_backend: str = Field(default="auto", alias="RENDER_BACKEND")
+    # Monthly spend cap in USD — operator warning threshold, not a hard limit
+    modal_monthly_budget: float = Field(default=30.0, alias="MODAL_MONTHLY_BUDGET")
+
+    # Meme image generation model (via LLM_BASE_URL provider, or direct API)
+    meme_image_model: str | None = Field(default=None, alias="MEME_IMAGE_MODEL")
+
+    # ------------------------------------------------------------------ #
+    # Derived properties                                                   #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def r2_enabled(self) -> bool:
+        """True when all four R2 credentials and endpoint are configured."""
+        return bool(
+            self.r2_bucket
+            and self.r2_endpoint
+            and self.r2_access_key_id
+            and self.r2_secret_access_key
+        )
+
     # ------------------------------------------------------------------ #
     # Lazy requirement checkers — call these at the point of use.         #
     # ------------------------------------------------------------------ #

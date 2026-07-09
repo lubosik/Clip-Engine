@@ -78,6 +78,14 @@ class Apify:
             )
             raise
 
+        if run is None:
+            log.warning("Apify actor run returned None", extra={"actor": actor_id})
+            return []
+        # apify-client >= 3 returns a typed pydantic Run model; 2.x returned a
+        # camelCase dict. Normalise to the dict shape.
+        if not isinstance(run, dict):
+            run = run.model_dump(by_alias=True)
+
         run_id = run.get("id", "unknown")
         usage = run.get("usage", {})
         cost = run.get("usageTotalUsd") or usage.get("COMPUTE_UNITS_CHARGED", None)

@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Clip Engine">
-  <meta name="theme-color" content="#080812">
+  <meta name="theme-color" content="#090910">
   <meta name="description" content="Operator review console for Clip Engine campaigns">
 
   <title>Clip Engine</title>
@@ -27,12 +27,65 @@
 </head>
 <body>
 
-<!-- ── Auth screen (shown until a valid token is stored) ──────────────────── -->
+<!-- ── Auth screen ──────────────────────────────────────────────────────────── -->
 <div id="auth-screen">
+
+  <!-- Hero video background — src populated by app.js after /api/hero fetch.
+       Hidden (opacity:0) until src is set and canplay fires. Falls back to
+       the CSS cinematic gradient backdrop which is always present. -->
+  <video
+    id="hero-video"
+    class="hero-bg-video"
+    muted
+    autoplay
+    loop
+    playsinline
+    preload="metadata"
+    aria-hidden="true"
+  ></video>
+
+  <!-- Light-stream line — winding luminous path across the floor.
+       Always visible whether or not video is playing. -->
+  <svg class="auth-lightstream" viewBox="0 0 400 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <defs>
+      <linearGradient id="ls-grad-auth" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%"   stop-color="#00e5ff" stop-opacity="0"/>
+        <stop offset="40%"  stop-color="#00e5ff" stop-opacity="0.80"/>
+        <stop offset="70%"  stop-color="#7c4ef0" stop-opacity="0.55"/>
+        <stop offset="100%" stop-color="#7c4ef0" stop-opacity="0"/>
+      </linearGradient>
+      <filter id="ls-blur-auth">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="1.2"/>
+      </filter>
+    </defs>
+    <!-- Glow layer (blurred duplicate) -->
+    <path
+      d="M-10 70 Q80 30 160 55 Q250 80 340 20 Q380 5 420 35"
+      stroke="url(#ls-grad-auth)"
+      stroke-width="4"
+      fill="none"
+      opacity="0.35"
+      filter="url(#ls-blur-auth)"
+      stroke-dasharray="480"
+      stroke-dashoffset="480"
+      class="ls-draw-path"
+    />
+    <!-- Sharp line -->
+    <path
+      d="M-10 70 Q80 30 160 55 Q250 80 340 20 Q380 5 420 35"
+      stroke="url(#ls-grad-auth)"
+      stroke-width="1.5"
+      fill="none"
+      stroke-dasharray="480"
+      stroke-dashoffset="480"
+      class="ls-draw-path"
+    />
+  </svg>
+
+  <!-- Glass card -->
   <div class="auth-box">
     <div class="auth-logo">
       <div class="auth-logo-mark" aria-hidden="true">
-        <!-- Inline logo mark (SVG, no external request) -->
         <svg width="36" height="36" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M32 7A25 25 0 1 1 7 32" stroke="#00e5ff" stroke-width="7" stroke-linecap="round"/>
           <circle cx="32" cy="32" r="5" fill="#00e5ff"/>
@@ -42,20 +95,22 @@
       <p>Operator Review Console</p>
     </div>
 
-    <div class="form-group">
-      <label class="form-label" for="auth-password">Admin Password</label>
-      <input
-        type="password"
-        id="auth-password"
-        class="form-control"
-        placeholder="Enter password"
-        autocomplete="current-password"
-        autocapitalize="none"
-      >
-      <div class="auth-error" id="auth-error" role="alert"></div>
-    </div>
+    <div class="auth-glass-card">
+      <div class="form-group">
+        <label class="form-label" for="auth-password">Admin Password</label>
+        <input
+          type="password"
+          id="auth-password"
+          class="form-control"
+          placeholder="Enter password"
+          autocomplete="current-password"
+          autocapitalize="none"
+        >
+        <div class="auth-error" id="auth-error" role="alert"></div>
+      </div>
 
-    <button class="btn btn-primary btn-full" id="auth-submit">Unlock</button>
+      <button class="btn btn-primary btn-full" id="auth-submit">Unlock</button>
+    </div>
   </div>
 </div>
 
@@ -75,7 +130,6 @@
       aria-label="Settings"
       title="Settings"
     >
-      <!-- Gear icon (inline SVG) -->
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
            stroke="currentColor" stroke-width="2"
            stroke-linecap="round" stroke-linejoin="round"
@@ -98,7 +152,6 @@
 
   <!-- View container -->
   <main id="main" role="main">
-    <!-- Views are lazy-rendered by each module on first activation -->
     <div id="view-queue"     class="view active" role="region" aria-label="Review queue"></div>
     <div id="view-campaigns" class="view"         role="region" aria-label="Campaigns"></div>
     <div id="view-analytics" class="view"         role="region" aria-label="Analytics"></div>
@@ -113,7 +166,7 @@
       aria-label="Review queue"
       aria-current="page"
     >
-      <!-- Inbox / tray icon -->
+      <!-- Inbox / queue icon -->
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
            aria-hidden="true">
@@ -130,7 +183,7 @@
       data-tab="campaigns"
       aria-label="Campaigns"
     >
-      <!-- Layers / campaign icon -->
+      <!-- Layers icon -->
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
            aria-hidden="true">
@@ -161,13 +214,11 @@
 </div>
 
 
-<!-- ── Global overlays (toasts + sheets injected here by app.js) ──────────── -->
+<!-- ── Global overlays ────────────────────────────────────────────────────── -->
 <div id="toast-container" role="status" aria-live="polite" aria-atomic="false"></div>
 
-<!-- Campaign wizard and bottom sheets are appended to <body> by JS -->
 
-
-<!-- ── App bootstrap (ES module) ──────────────────────────────────────────── -->
+<!-- ── App bootstrap ──────────────────────────────────────────────────────── -->
 <script type="module" src="/app.js"></script>
 
 </body>
