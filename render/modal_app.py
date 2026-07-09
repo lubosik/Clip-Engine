@@ -60,7 +60,17 @@ import modal
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("ffmpeg", "fonts-dejavu-core")
-    .pip_install("boto3", "faster-whisper", "yt-dlp")
+    .pip_install(
+        "boto3",
+        "faster-whisper",
+        "yt-dlp",
+        # CUDA runtime libs so ctranslate2 can use the L4/T4 GPU for Whisper.
+        # LD_LIBRARY_PATH is patched at runtime in _get_word_timings to point at
+        # these pip-installed shared libraries.  The CPU fallback remains in place
+        # so missing libs never crash the render.
+        "nvidia-cublas-cu12",
+        "nvidia-cudnn-cu12",
+    )
 )
 
 app = modal.App("clip-engine-render", image=image)
@@ -207,7 +217,8 @@ def _pipeline(job: dict, workdir: Path, log: logging.Logger) -> tuple[str, str]:
     # -- 8. Outro concat ---------------------------------------------------
     if outro_cfg.get("enabled") and outro_path and outro_path.exists():
         final_mp4 = workdir / "final.mp4"
-        _concat_outro(overlaid, outro_path, outro_cfg, codec_v, final_mp4, log)
+        _concat_outro(overlaid, outro_path, outro_cfg, codec_v, final_mp4, log,
+                      out_w=out_w, out_h=out_h)
     else:
         final_mp4 = overlaid
 
@@ -385,9 +396,15 @@ def _cut_and_reframe(
     any input aspect ratio to out_w × out_h (9:16) by scaling to the target
     height and center-cropping the width.
     """
+    # scale=-2:height maintains aspect ratio; crop to exact out_w×out_h.
+    # setsar=1 resets the fractional sample-aspect-ratio that scale introduces
+    # when the computed width isn't a perfect integer multiple of the height
+    # (e.g. 3414×1920 → crop to 1080×1920 produces SAR 5120:5121 without this fix).
+    # A non-unit SAR causes the ffmpeg concat filter to reject stream merging.
     scale_filter = (
         f"scale=-2:{out_h}:flags=lanczos,"
-        f"crop={out_w}:{out_h}"
+        f"crop={out_w}:{out_h},"
+        f"setsar=1"
     )
     cmd = [
         "ffmpeg", "-y",
@@ -434,16 +451,59 @@ def _write_silent_wav(path: Path, duration: float) -> None:
 # ---------------------------------------------------------------------------
 
 def _get_word_timings(audio_path: Path, log: logging.Logger) -> list[dict]:
-    """Run faster-whisper 'small' on *audio_path* and return cut-relative word dicts."""
+    """Run faster-whisper 'small' on *audio_path* and return cut-relative word dicts.
+
+    Tries CUDA first.  Both the WhisperModel constructor AND model.transcribe() are
+    inside the same try block because ctranslate2 uses lazy CUDA initialisation: the
+    constructor succeeds even when libcublas.so.12 is absent; the library-not-found
+    error fires later, at transcribe() time.  Catching only the constructor (the old
+    pattern) left the CPU fallback unreachable.
+
+    Before constructing the model, attempts to extend LD_LIBRARY_PATH with the
+    directories of pip-installed nvidia-cublas-cu12 and nvidia-cudnn-cu12 so that
+    ctranslate2 can find the shared libraries without a root-level CUDA install.
+    This block is fully guarded — its absence never crashes the render.
+
+    Returns [] only if both CUDA and CPU paths fail; the caller treats [] as blank
+    captions (still a valid render).
+    """
     from faster_whisper import WhisperModel  # type: ignore[import-untyped]
+
+    # Extend LD_LIBRARY_PATH so ctranslate2 finds pip-installed CUDA libs.
+    try:
+        import nvidia.cublas.lib as _cub
+        import nvidia.cudnn.lib as _cud
+        _nvidia_dirs = [str(Path(_cub.__file__).parent), str(Path(_cud.__file__).parent)]
+        _existing_ldpath = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = ":".join(
+            p for p in _nvidia_dirs + [_existing_ldpath] if p
+        )
+        log.info("faster-whisper: LD_LIBRARY_PATH extended with nvidia pip dirs: %s", _nvidia_dirs)
+    except Exception:
+        pass  # nvidia pip packages absent; CUDA path may still fail, CPU fallback will catch it
+
     log.info("faster-whisper: transcribing %s", audio_path.name)
-    # Use CUDA if a GPU is present; fall back to CPU + int8
+    segments = None
+
+    # CUDA attempt — constructor AND transcribe inside the same try so that lazy
+    # CUDA init failures at transcribe() time are caught here, not silently skipped.
     try:
         model = WhisperModel("small", device="cuda", compute_type="float16")
-    except Exception:
-        model = WhisperModel("small", device="cpu", compute_type="int8")
+        segments, _ = model.transcribe(str(audio_path), word_timestamps=True, language=None)
+        log.info("faster-whisper: CUDA path succeeded")
+    except Exception as cuda_exc:
+        log.warning("faster-whisper CUDA failed (%s); retrying on CPU", cuda_exc)
+        # CPU fallback — always available regardless of CUDA state.
+        try:
+            model = WhisperModel("small", device="cpu", compute_type="int8")
+            segments, _ = model.transcribe(str(audio_path), word_timestamps=True, language=None)
+            log.info("faster-whisper: CPU fallback succeeded")
+        except Exception as cpu_exc:
+            log.warning(
+                "faster-whisper CPU also failed (%s); captions will be blank", cpu_exc
+            )
+            return []
 
-    segments, _ = model.transcribe(str(audio_path), word_timestamps=True, language=None)
     words: list[dict] = []
     for seg in segments:
         if seg.words:
@@ -731,8 +791,21 @@ def _apply_overlays(
     hook_end = float(ss[1]) if len(ss) > 1 else 8.0
     if hook_enabled and hook_text.strip():
         hook_txt_file = workdir / "hook.txt"
-        hook_txt_file.write_text(_wrap_text(hook_text, 32), encoding="utf-8")
-        hook_fontsize = max(44, int(out_h * 0.038))
+        # Wrap at 22 chars/line so individual lines stay within frame width.
+        # Cap to 4 lines with a trailing ellipsis if the text wraps further.
+        _hook_lines = _wrap_text(hook_text, 22).split("\n")
+        _MAX_HOOK_LINES = 4
+        if len(_hook_lines) > _MAX_HOOK_LINES:
+            _hook_lines = _hook_lines[:_MAX_HOOK_LINES]
+            if not _hook_lines[-1].endswith("..."):
+                _hook_lines[-1] = _hook_lines[-1].rstrip() + "..."
+        hook_txt_file.write_text("\n".join(_hook_lines), encoding="utf-8")
+        # Fit fontsize: approximate Montserrat ExtraBold average advance ≈ 0.60 × fontsize.
+        # Ensure the longest wrapped line stays within 92% of the frame width.
+        _longest_line = max(len(l) for l in _hook_lines) if _hook_lines else 1
+        _base_fs = max(44, int(out_h * 0.038))
+        _fit_fs = int((out_w * 0.92) / (0.60 * max(_longest_line, 1)))
+        hook_fontsize = max(min(_base_fs, _fit_fs), 32)
         hook_y = int(out_h * 0.08)
         box_color = _html_to_ffmpeg_color(hook_cfg.get("box_color", "#111111CC"))
         fontfile_part = ""
@@ -849,27 +922,103 @@ def _concat_outro(
     codec_v: list[str],
     output: Path,
     log: logging.Logger,
+    out_w: int = 1080,
+    out_h: int = 1920,
 ) -> None:
-    """Concat main clip + outro, re-encoding to ensure stream compatibility."""
-    concat_list = main_clip.parent / "concat.txt"
-    concat_list.write_text(
-        f"file '{str(main_clip)}'\nfile '{str(outro)}'\n",
-        encoding="utf-8",
+    """Concat main clip + outro using the ffmpeg concat FILTER (not the concat demuxer).
+
+    The concat demuxer requires bit-identical stream parameters; when the outro has a
+    different fps or timebase from the main clip (a common case — e.g. 30 fps outro vs
+    23.976 fps main) it silently drops video frames or corrupts timestamps.
+
+    The concat filter normalises both inputs before joining:
+    - FPS-matches outro to the main clip's detected fps.
+    - Scale/pads outro to out_w × out_h.
+    - Resamples both audio streams to 48 kHz stereo.
+    - Uses anullsrc to synthesise silence for an outro that has no audio track.
+    """
+    # Probe main clip fps (fallback to 24000/1001 = 23.976 if probe fails).
+    _vprobe = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", str(main_clip)],
+        capture_output=True, text=True,
     )
+    main_fps = "24000/1001"
+    if _vprobe.returncode == 0:
+        try:
+            for _s in json.loads(_vprobe.stdout).get("streams", []):
+                if _s.get("codec_type") == "video":
+                    main_fps = _s.get("r_frame_rate", main_fps)
+                    break
+        except Exception:
+            pass
+
+    # Probe outro for audio track presence and video duration.
+    _oprobe = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", str(outro)],
+        capture_output=True, text=True,
+    )
+    outro_has_audio = False
+    outro_dur = 2.5  # fallback
+    if _oprobe.returncode == 0:
+        try:
+            for _s in json.loads(_oprobe.stdout).get("streams", []):
+                if _s.get("codec_type") == "audio":
+                    outro_has_audio = True
+                if _s.get("codec_type") == "video":
+                    outro_dur = float(_s.get("duration", outro_dur))
+        except Exception:
+            pass
+
     audio_mode = outro_cfg.get("audio", "keep")
-    a_filter = "-an" if audio_mode == "mute" else "-c:a aac -b:a 192k"
+    mute = audio_mode == "mute"
+
+    # Filter chains shared for all modes.
+    # setsar=1 on both inputs ensures the concat filter sees identical pixel geometry
+    # (the main clip may carry a fractional SAR artifact from the scale/crop reframe step).
+    _v_main = f"[0:v]setsar=1,fps={main_fps}[v0]"
+    _v_outro = f"[1:v]scale={out_w}:{out_h}:flags=lanczos,setsar=1,fps={main_fps}[v1]"
+
+    if mute:
+        filter_complex = f"{_v_main};{_v_outro};[v0][v1]concat=n=2:v=1:a=0[vout]"
+        map_args = ["-map", "[vout]", "-an"]
+        audio_enc: list[str] = []
+    elif outro_has_audio:
+        filter_complex = (
+            f"{_v_main};"
+            f"[0:a]aresample=48000,aformat=channel_layouts=stereo[a0];"
+            f"{_v_outro};"
+            f"[1:a]aresample=48000,aformat=channel_layouts=stereo[a1];"
+            f"[v0][a0][v1][a1]concat=n=2:v=1:a=1[vout][aout]"
+        )
+        map_args = ["-map", "[vout]", "-map", "[aout]"]
+        audio_enc = ["-c:a", "aac", "-b:a", "192k"]
+    else:
+        # Outro has no audio track — synthesise silence for that segment.
+        filter_complex = (
+            f"{_v_main};"
+            f"[0:a]aresample=48000,aformat=channel_layouts=stereo[a0];"
+            f"{_v_outro};"
+            f"anullsrc=r=48000:cl=stereo,atrim=duration={outro_dur:.4f},"
+            f"aformat=channel_layouts=stereo[a1];"
+            f"[v0][a0][v1][a1]concat=n=2:v=1:a=1[vout][aout]"
+        )
+        map_args = ["-map", "[vout]", "-map", "[aout]"]
+        audio_enc = ["-c:a", "aac", "-b:a", "192k"]
+
     cmd = (
-        [
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", str(concat_list),
-            "-c:v",
-        ]
-        + codec_v
-        + a_filter.split()
+        ["ffmpeg", "-y",
+         "-i", str(main_clip),
+         "-i", str(outro),
+         "-filter_complex", filter_complex]
+        + map_args
+        + ["-c:v"] + codec_v
+        + audio_enc
         + ["-movflags", "+faststart", str(output)]
     )
-    log.info("Outro concat → %s", output.name)
+    log.info(
+        "Outro concat (filter) → %s  main_fps=%s outro_audio=%s mute=%s",
+        output.name, main_fps, outro_has_audio, mute,
+    )
     _run_ffmpeg(cmd, "outro-concat")
 
 

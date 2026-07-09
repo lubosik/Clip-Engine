@@ -170,3 +170,26 @@
 - **Hero loop freeze root cause:** my earlier crossfade relied solely on `timeupdate` (~4Hz, throttled in background tabs); missing the pre-end window left the video ended with NO handler → hero froze on last frame ("it just stops" — user). Fix in app.js `_startSeamlessLoop`: rAF ticker as primary (precise near end), `ended` listener as safety net (forces swap; worst case fade-from-frozen-frame, never a stop), `error` on either layer degrades survivor to native loop (covers presigned-URL expiry ~1h on unbuffered layers), `preload=auto` both layers. sw.js cache v5→v6.
 - Tests: `tests/test_session_auth.py` (6). **Suite 328 passed.** node --check clean.
 - Render-bug stream: backend agent working on the 3 modal_app.py bugs in parallel (whisper CPU fallback, hook overflow, +11.5s duration) — its changes need `modal deploy` after landing.
+
+### 2026-07-09 (later) — Session: 3 render-quality bugs fixed in render/modal_app.py
+
+**BUG 1 — Whisper CPU fallback (FIXED)**
+- Root cause confirmed: `_get_word_timings` wrapped only `WhisperModel("small", device="cuda", ...)` in try/except. ctranslate2 uses lazy CUDA init — the constructor SUCCEEDS even without libcublas.so.12; the `Library not found` error fires at `.transcribe()`, which was outside the try. CPU fallback was dead code.
+- Fix: moved both `WhisperModel(...)` AND `model.transcribe(...)` inside the same outer try. If that block raises (at any point), we retry with `device="cpu", compute_type="int8"`. Return `[]` only if CPU also fails.
+- Additionally: added `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` to the Modal image `.pip_install()` so the CUDA path can actually find libcublas.so.12 on L4/T4. Added a guarded LD_LIBRARY_PATH extension in `_get_word_timings` using `nvidia.cublas.lib.__file__` to locate the pip-installed libs — guarded in try/except so its absence never crashes the render.
+
+**BUG 2 — Hook text overflow (FIXED)**
+- Root cause: `_wrap_text(hook_text, 32)` + `hook_fontsize = max(44, int(1920*0.038)) = 72px`. A 32-char line at 72px Montserrat ExtraBold ≈ 1382px >> 1080px frame width.
+- Fix: wrap at 22 chars/line; cap to 4 lines with trailing "..." if more; compute `fit_fontsize = int((out_w * 0.92) / (0.60 * longest_line_len))`; use `min(base_fs, fit_fs)` floored at 32px.
+- Verified with REAL local ffmpeg render (drawtext on 1080×1920 black canvas, Montserrat-ExtraBold.ttf): PIL pixel check — columns 0-5 left_max=0, columns 1075-1079 right_max=0. No text touches frame edges. Production hook "Every time you work out, you're actually damaging your muscles — and that's a good thing." wraps to 4 lines, longest=22 chars, fontsize=72px, approx px width=950px < 994px (92% of 1080).
+
+**BUG 3 — Output duration ~11.5s too long (FIXED)**
+- Local repro confirmed (source from R2 `campaigns/fitness/raw/youtube_2tM1LFFxeKg.mp4`):
+  - After `_cut_and_reframe(start=31.0, duration=30.4)`: reframed = 30.405s, 729 frames @ 24000/1001. Correct.
+  - After `_apply_overlays`: overlaid = 30.447s, 730 frames. Correct.
+  - After `_concat_outro` (OLD demuxer): video_duration=30.447s (730 frames — outro VIDEO missing!), audio_duration=32.93s (correctly includes both), format_duration=32.93s. Root cause: concat DEMUXER requires identical stream parameters; outro.mov is 30fps / timebase 1/15360, main is 24000/1001 / timebase 1/24000 — demuxer silently drops the outro video stream. On GPU+NVENC in production, the same fps/timebase mismatch caused different corruption (frame count inflated to 1064 = 44.38s).
+  - Secondary root cause found during testing: `_cut_and_reframe`'s `scale=-2:1920,crop=1080:1920` produces SAR 5120:5121 (fractional rounding artifact). The concat FILTER requires identical SAR; outro.mov has SAR 1:1. Fixed by adding `setsar=1` to the scale_filter chain in `_cut_and_reframe` AND to the main-clip normalisation chain in `_concat_outro`.
+- Fix: replaced concat DEMUXER approach in `_concat_outro` with concat FILTER: probes main clip fps; scale/setsar/fps-normalises outro to match; resamples both audio streams to 48k stereo; handles no-audio outro via `anullsrc`; concat=n=2:v=1:a=1; re-encode with codec_v. Extended `_concat_outro` signature with `out_w: int = 1080, out_h: int = 1920`; updated caller in `_pipeline`.
+- Verified locally: final_filter.mp4 = 32.950s / 790 frames @ 24000/1001 (expected 32.947s / ~789 frames, diff = 0.003s, 1 frame). Both video and audio streams correct. Format duration matches video.
+- 328/328 tests pass. AST parses clean.
+- **NEXT: `make deploy-modal` to redeploy the Modal GPU worker, then re-run demo.** No Railway push needed (modal_app.py runs in Modal, not Railway).
