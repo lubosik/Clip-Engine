@@ -6,7 +6,7 @@
  *   - clip video + thumb endpoints: network-only
  */
 
-const CACHE_NAME = 'clip-engine-static-v5';
+const CACHE_NAME = 'clip-engine-static-v6';
 
 const PRECACHE = [
   '/',

@@ -47,7 +47,7 @@ from fastapi.staticfiles import StaticFiles
 
 from sqlalchemy import func as sa_func
 
-from web.auth import require_auth
+from web.auth import SESSION_COOKIE, require_auth, session_token
 from web.campaigns_io import create_or_update_campaign, slugify
 
 # ---------------------------------------------------------------------------
@@ -1412,6 +1412,39 @@ def get_run_log(campaign: str, lines: int = 200) -> dict[str, Any]:
         )
 
     return {"campaign": slug, "path": str(log_path), "lines": tail}
+
+
+# ---------------------------------------------------------------------------
+# /api/auth/session — cookie for <video>/<img> media requests
+# ---------------------------------------------------------------------------
+
+@app.post("/api/auth/session", dependencies=[Depends(require_auth)])
+def create_auth_session() -> JSONResponse:
+    """POST /api/auth/session — set the ce_session cookie.
+
+    <video>/<img> tags cannot send an Authorization header, so clip/thumb
+    media requests authenticate via this HttpOnly cookie instead. The PWA
+    calls this right after unlock (and on boot with a saved token).
+    """
+    resp = JSONResponse({"session": True})
+    resp.set_cookie(
+        key=SESSION_COOKIE,
+        value=session_token(),
+        max_age=30 * 24 * 3600,
+        httponly=True,
+        secure=True,       # Railway serves HTTPS; modern browsers also allow it on localhost
+        samesite="strict",
+        path="/",
+    )
+    return resp
+
+
+@app.delete("/api/auth/session", dependencies=[Depends(require_auth)])
+def destroy_auth_session() -> JSONResponse:
+    """DELETE /api/auth/session — clear the session cookie (sign-out)."""
+    resp = JSONResponse({"session": False})
+    resp.delete_cookie(key=SESSION_COOKIE, path="/")
+    return resp
 
 
 # ---------------------------------------------------------------------------

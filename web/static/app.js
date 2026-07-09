@@ -43,7 +43,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const savedToken = localStorage.getItem(TOKEN_KEY) || '';
   if (savedToken) {
     setToken(savedToken);
-    _bootApp();
+    // Refresh the media session cookie BEFORE the queue renders <video>/<img>
+    // tags (they authenticate via cookie, not the Bearer header). Boot anyway
+    // if it fails — API fetches still work with the header.
+    api.createSession().catch(() => {}).finally(_bootApp);
   } else {
     _showAuth();
   }
@@ -131,9 +134,12 @@ async function _initHeroMedia() {
     if (!vA) return;
 
     // Load the same source into both layers (poster on both for the fade-in).
+    // preload=auto so both are fully buffered — the crossfade must never wait
+    // on the network, and presigned URLs expire after ~1h.
     [vA, vB].forEach((v) => {
       if (!v) return;
       if (posterSrc) v.poster = posterSrc;
+      v.preload = 'auto';
       v.src = videoSrc;
       v.load();
     });
@@ -154,50 +160,71 @@ async function _initHeroMedia() {
 }
 
 // Crossfade two identical video layers end→start so the loop has no visible
-// seam. When the playing layer nears its end, start the idle layer from 0 and
-// swap the `.active` class (CSS transitions opacity over 0.8s → a true
-// crossfade). The outgoing layer keeps playing its tail under the fade, then is
-// parked at frame 0 for reuse. Falls back to native loop if duration is unknown.
+// seam. Primary path: an rAF ticker watches the active layer and, ~0.8s before
+// its end, starts the idle layer from 0 and swaps the `.active` class (CSS
+// transitions opacity → a true crossfade). Safety nets, because a missed
+// window used to freeze the hero on the last frame:
+//   - `ended` on the active layer forces an immediate swap (worst case the
+//     fade starts from the frozen last frame — still smooth, never a stop);
+//   - a media `error` on either layer degrades the surviving layer to a
+//     native loop rather than dying.
 function _startSeamlessLoop(vA, vB) {
   const CROSSFADE = 0.8;  // seconds — matches the .hero-bg-video opacity transition
   let active = vA;
   let idle = vB;
-  let armed = true;
+  let swapping = false;
+  let dead = false;
 
-  const tick = () => {
-    const d = active.duration;
-    if (!d || !isFinite(d)) {
-      // Unknown/streaming duration — can't schedule a crossfade; degrade to loop.
-      active.loop = true;
-      return;
-    }
-    const lead = Math.min(CROSSFADE, d * 0.3);
-    if (armed && active.currentTime >= d - lead) {
-      armed = false;
+  const swap = () => {
+    if (swapping || dead) return;
+    swapping = true;
 
-      try { idle.currentTime = 0; } catch (_) { /* seek may throw pre-metadata */ }
-      const p = idle.play();
-      if (p && p.catch) p.catch(() => {});
-      idle.classList.add('active');
-      active.classList.remove('active');
+    try { idle.currentTime = 0; } catch (_) { /* seek may throw pre-metadata */ }
+    const p = idle.play();
+    if (p && p.catch) p.catch(() => {});
+    idle.classList.add('active');
+    active.classList.remove('active');
 
-      // Park the outgoing layer once its tail finishes (or after the fade window).
-      const outgoing = active;
-      const park = () => {
-        outgoing.pause();
-        try { outgoing.currentTime = 0; } catch (_) { /* ignore */ }
-      };
-      outgoing.addEventListener('ended', park, { once: true });
-      setTimeout(park, (lead + 0.15) * 1000);
+    // Park the outgoing layer once its tail is past the fade window.
+    const outgoing = active;
+    setTimeout(() => {
+      outgoing.pause();
+      try { outgoing.currentTime = 0; } catch (_) { /* ignore */ }
+    }, (CROSSFADE + 0.2) * 1000);
 
-      // Swap roles; re-arm shortly so the fresh active isn't retriggered at 0.
-      const tmp = active; active = idle; idle = tmp;
-      setTimeout(() => { armed = true; }, 250);
-    }
+    const tmp = active; active = idle; idle = tmp;
+    // Re-arm once the fresh active layer is clearly away from t=0.
+    setTimeout(() => { swapping = false; }, 500);
   };
 
-  vA.addEventListener('timeupdate', tick);
-  vB.addEventListener('timeupdate', tick);
+  // Safety net 1: never let an ended layer freeze the hero.
+  vA.addEventListener('ended', () => { if (active === vA) swap(); });
+  vB.addEventListener('ended', () => { if (active === vB) swap(); });
+
+  // Safety net 2: if a layer errors (e.g. expired presigned URL on an
+  // unbuffered layer), fall back to natively looping the surviving one.
+  const degrade = (survivor) => () => {
+    if (dead) return;
+    dead = true;
+    survivor.loop = true;
+    survivor.classList.add('active');
+    const p = survivor.play();
+    if (p && p.catch) p.catch(() => {});
+  };
+  vA.addEventListener('error', degrade(vB));
+  vB.addEventListener('error', degrade(vA));
+
+  // Primary: rAF ticker (precise near the end; timeupdate only fires ~4Hz).
+  const tick = () => {
+    if (dead) return;
+    const d = active.duration;
+    if (d && isFinite(d) && !swapping) {
+      const lead = Math.min(CROSSFADE, d * 0.3);
+      if (active.currentTime >= d - lead) swap();
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -236,6 +263,8 @@ function _showAuth(message) {
     try {
       await api.getStats();
       localStorage.setItem(TOKEN_KEY, pw);
+      // Set the media session cookie so <video>/<img> tags authenticate.
+      await api.createSession().catch(() => {});
       _bootApp();
     } catch (err) {
       setToken('');
@@ -637,6 +666,8 @@ async function _openSettings() {
 }
 
 function _logout() {
+  // Clear the media session cookie server-side (needs the token, so first).
+  api.destroySession().catch(() => {});
   localStorage.removeItem(TOKEN_KEY);
   setToken('');
   clearInterval(_pollTimer);

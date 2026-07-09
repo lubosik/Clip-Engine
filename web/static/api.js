@@ -63,6 +63,15 @@ async function request(method, path, { body, multipart = false } = {}) {
 // ── Public API surface ────────────────────────────────────────────────────────
 
 export const api = {
+  // Session cookie — lets <video>/<img> tags authenticate (they can't send
+  // the Bearer header). Called after unlock and on boot with a saved token.
+  createSession() {
+    return request('POST', '/api/auth/session');
+  },
+  destroySession() {
+    return request('DELETE', '/api/auth/session');
+  },
+
   // Hero media (unauthenticated — called before login)
   getHero() {
     return fetch('/api/hero').then((r) => {
