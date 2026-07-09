@@ -193,3 +193,12 @@
 - Verified locally: final_filter.mp4 = 32.950s / 790 frames @ 24000/1001 (expected 32.947s / ~789 frames, diff = 0.003s, 1 frame). Both video and audio streams correct. Format duration matches video.
 - 328/328 tests pass. AST parses clean.
 - **NEXT: `make deploy-modal` to redeploy the Modal GPU worker, then re-run demo.** No Railway push needed (modal_app.py runs in Modal, not Railway).
+
+### 2026-07-09 (later) — Render fixes VERIFIED on production output; yt-dlp bot-wall mitigated
+- User supplied a fresh GitHub PAT (rotation-flagged, in ~/.git-credentials) → pushed the 2 held commits + render fixes (`dce12d0..5959b09`). `make deploy-modal` deployed the fixed worker.
+- Demo run #2 (pid 27): discovery grew 87→113 sources. One source failed at download with **yt-dlp "Sign in to confirm you're not a bot"** (YouTube bot-walls Railway's datacenter IP; per-source failure, run continued). Next source (Huberman podcast, ~93min) produced **7 new clips (ids 6-12), 12 total**; "Campaign run complete" at 21:01.
+- **All 3 render fixes VERIFIED BY FRAME EXTRACTION on clip 12** (61.16s file, video==container duration, 1080×1920@29.97): hook fully inside frame (4 wrapped lines + ellipsis); **word-by-word karaoke captions WORKING** (cyan current-word highlight, matches speech — CPU whisper fallback fired); outro card "@viciresearch FOLLOW FOR MORE" present at tail; hook gone by 25s; badge/watermark/credit all present. Postable quality.
+- User is actively reviewing in the dashboard (clip 5 = rejected) → cookie media auth confirmed working in the wild.
+- **yt-dlp mitigation added** (`producer/download.py`): on "Sign in to confirm…not a bot" errors, retry the download through a player-client chain default(web) → ios,tv → android (innertube clients are bot-checked far less on datacenter IPs). Non-bot-check errors do NOT retry. `tests/test_download_retry.py` (4 tests, fake yt_dlp module). **Suite 332 passed.** If the chain proves insufficient in production, next options: per-campaign cookies file, or an Apify downloader actor as paid fallback.
+- Watcher-script lesson: per-source failures log tracebacks that include producer/run.py frames while the RUN SURVIVES (outer catch in _process_source) — do not treat those as fatal; only "Campaign run complete" (or timeout) ends a watch.
+- STILL OPEN: POSTIZ_API_URL missing in Railway (posting blocked); review-gate §8 not implemented; meme demo not run; hero crossfade needs a human eye on the live login page; rotate ALL chat-pasted creds (now including the new PAT).

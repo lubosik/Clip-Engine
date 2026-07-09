@@ -30,6 +30,17 @@ _YTDLP_FORMAT = (
 )
 
 
+# Player-client retry chain for YouTube's "Sign in to confirm you're not a bot"
+# check, which targets datacenter IPs (Railway) on the default web client. The
+# ios/tv/android innertube clients are checked far less aggressively, so a
+# blocked download often succeeds on retry with a different client.
+_YTDLP_CLIENT_CHAIN: list[list[str] | None] = [
+    None,                    # default (web) — works for many videos
+    ["ios", "tv"],           # most reliable bypass pair from datacenter IPs
+    ["android"],             # last resort
+]
+
+
 def _download_youtube(url: str, dest: Path) -> Path:
     try:
         import yt_dlp  # type: ignore[import]
@@ -38,7 +49,7 @@ def _download_youtube(url: str, dest: Path) -> Path:
             "yt-dlp is required for YouTube downloads. Install with: pip install yt-dlp"
         ) from exc
 
-    ydl_opts: dict[str, Any] = {
+    base_opts: dict[str, Any] = {
         "format": _YTDLP_FORMAT,
         "outtmpl": str(dest.with_suffix(".%(ext)s")),
         "merge_output_format": "mp4",
@@ -48,8 +59,29 @@ def _download_youtube(url: str, dest: Path) -> Path:
     }
 
     log.info("Downloading YouTube video", extra={"url": url, "dest": str(dest)})
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+    last_exc: Exception | None = None
+    for clients in _YTDLP_CLIENT_CHAIN:
+        ydl_opts = dict(base_opts)
+        if clients is not None:
+            ydl_opts["extractor_args"] = {"youtube": {"player_client": clients}}
+            log.info(
+                "Retrying YouTube download with player_client=%s", ",".join(clients),
+                extra={"url": url},
+            )
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            last_exc = None
+            break
+        except Exception as exc:  # DownloadError subclasses vary by yt-dlp version
+            last_exc = exc
+            msg = str(exc)
+            # Only the bot-check / auth wall benefits from a client retry;
+            # anything else (404, private, network) fails the same way again.
+            if "Sign in to confirm" not in msg and "not a bot" not in msg:
+                raise
+    if last_exc is not None:
+        raise last_exc
 
     # yt-dlp may change the extension; find the actual file
     mp4_path = dest.with_suffix(".mp4")
