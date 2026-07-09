@@ -1382,6 +1382,38 @@ def trigger_run(
         )
 
 
+@app.get("/api/runs/{campaign}/log", dependencies=[Depends(require_auth)])
+def get_run_log(campaign: str, lines: int = 200) -> dict[str, Any]:
+    """GET /api/runs/{campaign}/log — tail the producer log for a campaign.
+
+    Makes silent producer failures legible without shell access (spec §14).
+    Returns the last `lines` lines (default 200, capped at 2000).
+    """
+    slug = slugify(campaign)
+    log_path = STORAGE_DIR / "logs" / f"producer-{slug}.log"
+    if not log_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail={"error": f"No log file for campaign {slug!r} yet", "code": 404},
+        )
+
+    lines = max(1, min(lines, 2000))
+    try:
+        with log_path.open("rb") as fh:
+            # Read at most ~1MB from the end — plenty for a 2000-line tail.
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 1_048_576))
+            tail = fh.read().decode("utf-8", errors="replace").splitlines()[-lines:]
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"Could not read log: {exc}", "code": 500},
+        )
+
+    return {"campaign": slug, "path": str(log_path), "lines": tail}
+
+
 # ---------------------------------------------------------------------------
 # Static PWA — mounted at / LAST so it never shadows the /api routes above.
 # Guarded so an empty dir doesn't crash startup.
