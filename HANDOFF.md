@@ -19,8 +19,9 @@
 | Frontend cinematic revamp (web/static/) | ✅ landed | all JS passes node --check; [object Object] fixed |
 | Meme engine (meme/) | ✅ landed | 277 total tests passing (83 new) |
 | Render/harness (render/modal_app.py, producer dispatch, Makefile, scheduler demo routing) | 🔄 IN FLIGHT | background agent building; if this file still says in-flight and no `Makefile`/`render/modal_app.py` exists, that stream died — re-run it per REVAMP_CONTRACTS §3/§4/§5/§9 |
-| Review pass + tests + commit | ⏳ not started | after render stream lands |
-| Railway deploy of v2 | ⏳ not started | needs env vars below |
+| Review pass + tests + commit | ✅ done | audit #1 NEEDS FIXES (7 seams) → all fixed +1 extra → audit #2 APPROVED → committed `2520184` (65 files) |
+| Push to GitHub | ✅ done 2026-07-09 | `627de12..2520184` → Railway auto-deploy triggered |
+| Railway deploy of v2 | 🔄 building | verify /healthz + login on the live URL; user must add the new env vars (emailed draft + listed below) for R2/Modal to activate — app falls back to local storage/render until then |
 
 **What is verified working right now (live-tested, not assumed):**
 - R2 bucket `kongwa-tech-clipping-engine` — full read/write confirmed with the S3 creds (put/get/delete test object).
@@ -91,4 +92,9 @@
   6. (HIGH) postiz.py hardcoded `video/mp4` MIME for all uploads → meme PNGs sent as video. Now maps from extension.
   7. (MED) wizard sent `meme_ref_0/1/...` indexed fields; FastAPI collects `list[UploadFile]` only from repeated `meme_refs` fields → meme refs silently dropped. Fixed to repeated field name.
   8. (EXTRA, found during fix 7) wizard's `visual_ref_N` files had NO server-side param at all — visual reference images were silently discarded. Added `visual_refs: list[UploadFile]` to POST+PUT endpoints, `save_visual_refs()` → `campaigns/<slug>/visual_refs/`.
-- After fixes: 307/307 tests pass, node --check clean, imports clean. Focused re-review launched.
+- After fixes: 307/307 tests pass, node --check clean, imports clean.
+- **Re-review: APPROVED** (one MEDIUM residual — temp-file cleanup not exception-safe — fixed anyway: `_process_clip` now wraps posting in try/finally via extracted `_schedule_resolved_clip()`; suite still 307 green).
+- **Committed `2520184`** — "Revamp v2: cinematic PWA, meme engine, Modal GPU renders, R2 storage, demo mode, spend tracking" (65 files, +12553/−1418).
+- Railway env-var block emailed to lubosi@kongwatech.com as a Gmail DRAFT (user must hit Send) — includes rotation + delete-after-use reminder.
+- Old GitHub PAT was revoked (push 403). User supplied a fresh PAT (repo scope) 2026-07-09 — stored in `~/.git-credentials` (chmod 600). **Pushed `627de12..2520184` to origin/main → Railway auto-deploy triggered.** PAT is rotation-flagged like the rest.
+- NEXT: (1) user adds new env vars in Railway (R2_*, MODAL_*, RENDER_BACKEND, MODAL_MONTHLY_BUDGET, MEME_IMAGE_MODEL) — until then app runs in local-storage/local-render fallback mode, which is safe; (2) verify live URL /healthz + login hero + queue; (3) put real DATABASE_URL into Modal secret `clip-engine`; (4) `make demo` against production; (5) meme refs into campaigns/fitness/meme_refs/; (6) TikTok in Postiz; (7) rotate all chat-pasted credentials.
