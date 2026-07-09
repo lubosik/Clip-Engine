@@ -126,20 +126,78 @@ async function _initHeroMedia() {
 
     if (!videoSrc) return;
 
-    const video = document.getElementById('hero-video');
-    if (!video) return;
+    const vA = document.getElementById('hero-video');
+    const vB = document.getElementById('hero-video-b');
+    if (!vA) return;
 
-    if (posterSrc) video.poster = posterSrc;
+    // Load the same source into both layers (poster on both for the fade-in).
+    [vA, vB].forEach((v) => {
+      if (!v) return;
+      if (posterSrc) v.poster = posterSrc;
+      v.src = videoSrc;
+      v.load();
+    });
 
-    video.addEventListener('canplay', () => {
-      video.classList.add('active');
+    vA.addEventListener('canplay', () => {
+      vA.classList.add('active');
+      const p = vA.play();
+      if (p && p.catch) p.catch(() => {});
+      if (vB) {
+        _startSeamlessLoop(vA, vB);
+      } else {
+        vA.loop = true;  // graceful fallback: one layer → plain native loop
+      }
     }, { once: true });
-
-    video.src = videoSrc;
-    video.load();
   } catch {
     // Non-fatal — CSS backdrop is always there.
   }
+}
+
+// Crossfade two identical video layers end→start so the loop has no visible
+// seam. When the playing layer nears its end, start the idle layer from 0 and
+// swap the `.active` class (CSS transitions opacity over 0.8s → a true
+// crossfade). The outgoing layer keeps playing its tail under the fade, then is
+// parked at frame 0 for reuse. Falls back to native loop if duration is unknown.
+function _startSeamlessLoop(vA, vB) {
+  const CROSSFADE = 0.8;  // seconds — matches the .hero-bg-video opacity transition
+  let active = vA;
+  let idle = vB;
+  let armed = true;
+
+  const tick = () => {
+    const d = active.duration;
+    if (!d || !isFinite(d)) {
+      // Unknown/streaming duration — can't schedule a crossfade; degrade to loop.
+      active.loop = true;
+      return;
+    }
+    const lead = Math.min(CROSSFADE, d * 0.3);
+    if (armed && active.currentTime >= d - lead) {
+      armed = false;
+
+      try { idle.currentTime = 0; } catch (_) { /* seek may throw pre-metadata */ }
+      const p = idle.play();
+      if (p && p.catch) p.catch(() => {});
+      idle.classList.add('active');
+      active.classList.remove('active');
+
+      // Park the outgoing layer once its tail finishes (or after the fade window).
+      const outgoing = active;
+      const park = () => {
+        outgoing.pause();
+        try { outgoing.currentTime = 0; } catch (_) { /* ignore */ }
+      };
+      outgoing.addEventListener('ended', park, { once: true });
+      setTimeout(park, (lead + 0.15) * 1000);
+
+      // Swap roles; re-arm shortly so the fresh active isn't retriggered at 0.
+      const tmp = active; active = idle; idle = tmp;
+      setTimeout(() => { armed = true; }, 250);
+    }
+  };
+
+  vA.addEventListener('timeupdate', tick);
+  vB.addEventListener('timeupdate', tick);
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────

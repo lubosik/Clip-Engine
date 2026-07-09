@@ -31,14 +31,26 @@
 <div id="auth-screen">
 
   <!-- Hero video background — src populated by app.js after /api/hero fetch.
-       Hidden (opacity:0) until src is set and canplay fires. Falls back to
-       the CSS cinematic gradient backdrop which is always present. -->
+       Two stacked layers crossfade end→start for a SEAMLESS loop (no hard cut):
+       app.js starts the idle layer from frame 0 and fades it in over the last
+       ~0.8s of the playing layer, so the wrap point is never visible.
+       No native `loop` attribute — the crossfade manager owns looping (it falls
+       back to native loop only if a layer is missing or duration is unknown).
+       Hidden (opacity:0) until src is set and canplay fires. Falls back to the
+       CSS cinematic gradient backdrop, which is always present. -->
   <video
     id="hero-video"
     class="hero-bg-video"
     muted
     autoplay
-    loop
+    playsinline
+    preload="metadata"
+    aria-hidden="true"
+  ></video>
+  <video
+    id="hero-video-b"
+    class="hero-bg-video"
+    muted
     playsinline
     preload="metadata"
     aria-hidden="true"

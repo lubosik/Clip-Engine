@@ -116,3 +116,13 @@
   `curl -sX POST https://<live>/api/runs/fitness -u ':<WEB_ADMIN_PASSWORD>' -H 'content-type: application/json' -d '{"mode":"demo"}'`
   → returns `{started, pid, max_apify_spend:2.0, max_modal_spend:2.0}`; logs at `/data/clips/logs/producer-fitness.log`; results land in the Queue (demo badge, drafts to test channels).
 - State: committed + **pushed** (Railway auto-deploy). BLOCKER unchanged: need the live Railway URL from the user to trigger + watch.
+
+### 2026-07-09 (later) — Session: seamless hero-video loop (crossfade, no hard cut)
+- User reported the login hero video "hard cuts" at the loop point. Root cause: `index.html` used the native HTML `loop` attribute on a single `<video>` → instant snap to frame 0. Spec §10 requires a crossfade (~0.5–1s), no hard cut.
+- Fix (two-layer crossfade):
+  - `index.html`: removed `loop`; added a second stacked layer `#hero-video-b` (same `.hero-bg-video` class, absolute inset:0).
+  - `app.js`: `_initHeroMedia` now loads the same src+poster into both layers, plays A, and calls new `_startSeamlessLoop(vA,vB)`. That watches `timeupdate`; when the active layer reaches `duration - min(0.8s, 0.3·d)`, it starts the idle layer from 0, swaps the `.active` class (CSS transitions opacity 0.8s → true crossfade), parks the outgoing layer at frame 0 after its tail (`ended` or timeout), and re-arms after 250ms. Falls back to native `loop` if only one layer exists or duration is non-finite.
+  - `sw.js`: cache `v4` → `v5` (index.html/app.js are precached).
+- node --check clean on app.js + sw.js. Visual crossfade can't be verified headlessly — confirm on the live site after deploy.
+- Railway CLI login: `railway login --browserless` needs a PTY (no output otherwise). Ran it under `script -qfc ... /log`; pairing code emitted to the log. Background login task waiting for user to authorize at railway.com/activate.
+- State: committed + pushed (Railway auto-deploy).
