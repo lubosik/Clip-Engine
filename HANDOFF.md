@@ -106,4 +106,13 @@
 - Fix (finished; 307 tests + node --check green):
   - `web/static/app.js`: on `controllerchange` (new SW taking control after deploy) force exactly one `window.location.reload()`. Guarded by `hadController` (no reload on first-ever visit → no reload loop) and a `reloaded` flag (never double-reloads).
   - `web/static/sw.js`: cache `v3` → `v4` to invalidate the stale precache.
-- State: committed locally on `main`; **push HELD pending user OK** (push = Railway auto-deploy). Still blocked on the live Railway URL to verify server-side that v2 is actually serving.
+- State: committed `889e7c3`, **pushed to origin/main** (Railway auto-deploy triggered). Still need the live Railway URL to verify server-side that v2 is serving.
+
+### 2026-07-09 (later) — Session: safe on-demand run trigger for "Run on Railway"
+- User chose to run the demo **on Railway** (creds live there). Found a real spend-gate gap: `POST /api/runs/{campaign}` spawned `producer.run <slug>` with NO `--mode` and NO spend caps → an on-demand web-triggered run was **uncapped**, violating spec §9's hard spend gate. (Note: fitness has no `mode:` key and `CampaignConfig.mode` defaults to `"demo"`, so mode itself was fine — but demo mode does NOT cap clip count or dollars; only `make demo`'s `--max-*-spend 2` flags do.)
+- Fix (`web/api.py` `trigger_run`): accepts optional JSON body `{mode, max_apify_spend, max_modal_spend}`; **omitted caps fall back to demo defaults (2.0/2.0)** so a web-triggered run is never uncapped; validates mode ∈ {demo,production} and caps > 0 (422 otherwise); passes `--mode/--max-apify-spend/--max-modal-spend` through to the subprocess and echoes them in the JSON response + log line. The uncapped path stays reserved for the daily cron `producer.run --all` (bounded by discovery limits + 80%-budget warning).
+- Added `tests/test_trigger_run.py` (7 tests: default-capped, body overrides, invalid mode → 422, non-positive/non-numeric cap → 422, unknown campaign → 404; Popen monkeypatched). **Full suite 314 passed.**
+- To run the demo on Railway once the URL is known:
+  `curl -sX POST https://<live>/api/runs/fitness -u ':<WEB_ADMIN_PASSWORD>' -H 'content-type: application/json' -d '{"mode":"demo"}'`
+  → returns `{started, pid, max_apify_spend:2.0, max_modal_spend:2.0}`; logs at `/data/clips/logs/producer-fitness.log`; results land in the Queue (demo badge, drafts to test channels).
+- State: committed + **pushed** (Railway auto-deploy). BLOCKER unchanged: need the live Railway URL from the user to trigger + watch.

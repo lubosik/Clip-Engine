@@ -1265,13 +1265,61 @@ def _compute_next_run_at() -> str | None:
 # /api/runs
 # ---------------------------------------------------------------------------
 
+# On-demand web-triggered runs always carry a hard spend ceiling (spec §9).
+# These mirror `make demo`'s conservative caps; the operator can raise them per
+# request via the JSON body.  The uncapped path stays reserved for the cron
+# (`producer.run --all`), which is bounded by campaign discovery limits instead.
+DEFAULT_ONDEMAND_APIFY_SPEND = 2.0
+DEFAULT_ONDEMAND_MODAL_SPEND = 2.0
+
+
 @app.post("/api/runs/{campaign}", dependencies=[Depends(require_auth)])
-def trigger_run(campaign: str) -> dict[str, Any]:
+def trigger_run(
+    campaign: str, body: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """POST /api/runs/{campaign} — spawn a producer run in the background.
 
     Uses the same Python interpreter that is running this process.
     Subprocess stdout/stderr are redirected to STORAGE_DIR/logs/producer-<campaign>.log.
+
+    Optional JSON body (all keys optional):
+      - mode: "demo" | "production" — overrides the campaign's configured mode.
+      - max_apify_spend: float USD ceiling for discovery (default 2.0).
+      - max_modal_spend: float USD ceiling for render (default 2.0).
+    A web-triggered run is NEVER uncapped: omitted caps fall back to the demo
+    defaults so the spec §9 spend gate always applies.
     """
+    body = body or {}
+
+    # Validate optional mode override.
+    run_mode = body.get("mode")
+    if run_mode is not None and run_mode not in {"demo", "production"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "mode must be 'demo' or 'production'", "code": 422},
+        )
+
+    def _cap(key: str, default: float) -> float:
+        raw = body.get(key)
+        if raw is None:
+            return default
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": f"{key} must be a number", "code": 422},
+            )
+        if val <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": f"{key} must be greater than 0", "code": 422},
+            )
+        return val
+
+    max_apify_spend = _cap("max_apify_spend", DEFAULT_ONDEMAND_APIFY_SPEND)
+    max_modal_spend = _cap("max_modal_spend", DEFAULT_ONDEMAND_MODAL_SPEND)
+
     # Validate campaign exists.
     slug = slugify(campaign)
     campaigns_dir = Path(__file__).resolve().parent.parent / "campaigns"
@@ -1296,21 +1344,36 @@ def trigger_run(campaign: str) -> dict[str, Any]:
     except OSError:
         log_fh = subprocess.DEVNULL  # type: ignore[assignment]
 
+    cmd = [
+        sys.executable, "-m", "producer.run", slug,
+        "--max-apify-spend", str(max_apify_spend),
+        "--max-modal-spend", str(max_modal_spend),
+    ]
+    if run_mode is not None:
+        cmd += ["--mode", run_mode]
+
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "producer.run", slug],
+            cmd,
             stdout=log_fh,
             stderr=log_fh,
             stdin=subprocess.DEVNULL,
             start_new_session=True,  # detach from the parent process group
         )
         logger.info(
-            "Spawned producer run: campaign=%s pid=%d log=%s",
-            slug,
-            proc.pid,
-            log_path,
+            "Spawned producer run: campaign=%s pid=%d mode=%s apify_cap=%.2f "
+            "modal_cap=%.2f log=%s",
+            slug, proc.pid, run_mode or "(campaign default)",
+            max_apify_spend, max_modal_spend, log_path,
         )
-        return {"started": True, "campaign": slug, "pid": proc.pid}
+        return {
+            "started": True,
+            "campaign": slug,
+            "pid": proc.pid,
+            "mode": run_mode,
+            "max_apify_spend": max_apify_spend,
+            "max_modal_spend": max_modal_spend,
+        }
     except Exception as exc:
         logger.error("Failed to spawn producer for %r: %s", slug, exc, exc_info=True)
         raise HTTPException(
