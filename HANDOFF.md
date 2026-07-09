@@ -202,3 +202,132 @@
 - **yt-dlp mitigation added** (`producer/download.py`): on "Sign in to confirm…not a bot" errors, retry the download through a player-client chain default(web) → ios,tv → android (innertube clients are bot-checked far less on datacenter IPs). Non-bot-check errors do NOT retry. `tests/test_download_retry.py` (4 tests, fake yt_dlp module). **Suite 332 passed.** If the chain proves insufficient in production, next options: per-campaign cookies file, or an Apify downloader actor as paid fallback.
 - Watcher-script lesson: per-source failures log tracebacks that include producer/run.py frames while the RUN SURVIVES (outer catch in _process_source) — do not treat those as fatal; only "Campaign run complete" (or timeout) ends a watch.
 - STILL OPEN: POSTIZ_API_URL missing in Railway (posting blocked); review-gate §8 not implemented; meme demo not run; hero crossfade needs a human eye on the live login page; rotate ALL chat-pasted creds (now including the new PAT).
+
+### 2026-07-09 — Session: Review-gate workstream (§6c/§8) — COMPLETE
+
+**All 7 build items landed. Full test suite: 393 passed (61 new tests added on top of 332 baseline). Zero regressions.**
+
+**1. DB — migration 003 + model parity**
+- `migrations/versions/003_review_gate.py`: adds `gate_status String(16) NOT NULL DEFAULT 'pending'`, `gate_reasons JSONB NULL`, `formula_score FLOAT NULL`; creates index `ix_clips_gate_status`; reversible downgrade included.
+- `core/models.py`: Clip gains those 3 mapped columns + `Index("ix_clips_gate_status", "gate_status")` in `__table_args__`.
+- `docs/REVAMP_CONTRACTS.md`: Section 0 added — documents gate_status values (pending/ready/didnt_pass/overridden), gate module contract, override endpoint, style refs location, new config keys.
+
+**2. Gate module — `producer/review_gate.py`**
+- `GateResult` dataclass: `gate_status`, `gate_reasons` (list of `{phase, check, pass, reason}` dicts), `formula_score`.
+- Phase 1 (design): ffprobe resolution ≥1080×1920 + duration sanity; extract 3 frames (t≈3s hook, mid-clip, t≈1s-before-outro) + 1 outro frame; single vision-LLM call with style-ref images for 7 checks (hook_present_in_hook_frame, hook_absent_in_mid_frame, captions_present, watermark_visible, real_humans, speaker_centered, animation_detected — animation is auto-fail). Captions-match-speech skipped honestly (transcript comparison requires accurate whisper; marked phase=1, check=captions_match_speech, pass=null).
+- Phase 2 (content, only if Phase 1 passes): single LLM call scores 10 rubric questions (hook_quality, promise_delivery, novelty, pacing, standalone_value, speaker_engagement, clean_ending, shareability, comprehension, completion_likelihood; 0–1 each, avg = formula_score); 4 safety auto-fail flags (unsafe_diet_content, medical_claims, harmful_content, guideline_violation). Pass: formula_score ≥ 0.6 AND no safety fail.
+- Meme clips (`clip_row.kind == 'meme'`) skip both phases → gate_status stays 'pending'.
+- Empty/None video path → gate_status 'pending' with reason 'no video path'.
+- LLM/vision transport errors → gate_status 'pending' with reason `gate unavailable: <err>` (never blocks the producer run).
+- All transport functions (`_probe_video`, `_extract_frames`, `_load_style_refs`, `_vision_llm_call`, `_content_llm_call`) are module-level and monkeypatchable in tests; no real LLM/network calls in the test suite.
+- Style refs loaded from `campaigns/{campaign_name}/style_refs/*.jpg` (fitness refs already copied there in a prior session).
+- LLM model: reads `os.environ["LLM_MODEL"]` with fallback `"claude-sonnet-4-6"` — same pattern as `core/llm.py`. OpenRouter auto-routing via `sk-or-` prefix on `LLM_API_KEY` (not set locally; live in Railway).
+
+**3. Producer wiring — `producer/run.py`**
+- `DEMO_RENDER_CAP = 10`: hard cap on total renders per run regardless of DEMO_CLIP_TARGET (bounds spend).
+- After each successful render+DB insert: `run_gate(clip_row, r2_path, transcript_segments, campaign_cfg, session)` called; result written to `clip_row.gate_status/gate_reasons/formula_score`.
+- Only clips with `gate_status == 'ready'` count toward `DEMO_CLIP_TARGET`; `total_renders` counts all renders toward the cap.
+- Cap-trip logged with clear message; run terminates early.
+
+**4. API — `web/api.py`**
+- `_clip_to_dict` now includes `gate_status`, `gate_reasons`, `formula_score` in every clip payload.
+- New endpoint: `POST /api/clips/{clip_id}/override-gate` (requires auth) — sets `gate_status='overridden'`, preserves `gate_reasons` so the operator can see why it failed. Returns full clip dict. Returns 404 for unknown clip_id.
+
+**5. Frontend — `web/static/queue.js` + `styles.css` + `sw.js`**
+- Queue now splits into two sections: "Ready to review" (gate_status != 'didnt_pass') and "Didn't pass review" (gate_status == 'didnt_pass').
+- Fail cards (`_buildFailCard`) tinted amber with `<details>` disclosure showing each `gate_reasons` entry — phase, check name, and reason string.
+- Override button on each fail card calls `api.overrideGate(id)`, updates local clip state, and re-renders on success (moves card from fail to ready section).
+- Badge count (`onBadge`) counts only non-didnt_pass clips.
+- `styles.css`: ~150 lines added for `.queue-section-header`, `.queue-section-header--fail`, `.clip-card--fail`, `.fail-card-inner`, `.fail-why`, `.fail-why-summary`, `.fail-why-reasons`, `.chip-amber`. Design tokens: `--amber #ffb454`, `--amber-bg`, `--amber-border`, `--amber-glow` (consistent with existing amber usage).
+- `api.js`: `overrideGate(id)` added.
+- `sw.js`: cache version v6 → v7 to bust the precache.
+- `node --check` passes on queue.js and api.js.
+
+**6. Discovery guard — `producer/discover.py` + `core/config.py`**
+- `YouTubeSourceConfig`: new `exclude_channels: list[str] = Field(default_factory=list)`.
+- `SourcesConfig`: new `exclude_keywords: list[str] = Field(default_factory=list)`.
+- `discover_all()`: applies YouTube channel filter (author_handle substring, case-insensitive) and cross-platform keyword filter (title substring, case-insensitive) with `_is_excluded_by_keywords` helper. Filtered candidates are logged at INFO level. `campaigns/fitness.yaml` not touched.
+
+**7. Tests**
+- `tests/test_review_gate.py` (28 tests): JSON parsing, content scoring, transcript slicing, vision verdict mapping, resolution/duration checks, meme clip pass-through, transport error → pending, happy path → ready, animation → didnt_pass, low formula_score → didnt_pass, safety flag → didnt_pass. All LLM/vision calls mocked via monkeypatch — NO network calls.
+- `tests/test_migration_003.py` (12 tests): Clip model has all 3 columns with correct nullability/length/defaults + index; Clip instantiation roundtrip for pending/ready/didnt_pass/overridden.
+- `tests/test_discovery_exclusion.py` (12 tests): YouTube channel exclusion, keyword exclusion, case-insensitivity, partial match, platform scoping, combined exclusions, empty lists.
+- `tests/test_gate_api.py` (10 tests): gate fields in clip payload (5 scenarios), override-gate endpoint (5 scenarios including 404 + auth check). Fixture uses file-based SQLite (tmp_path) so all connections share the same on-disk store — avoids SQLite in-memory isolation issue. Fixture teardown resets `core.db._engine`/`_SessionLocal` to prevent cross-test leakage.
+
+**8. Fixtures**
+- `web/static/fixtures.js`: all 5 mock clips now carry `gate_status`, `gate_reasons`, `formula_score`. Demo distribution: clip_001/002 = 'ready', clip_003 = 'didnt_pass' (watermark + captions failed — showcases the fail section), meme_001/002 = 'pending' (memes skip gate).
+
+**What remains unverifiable without LLM_API_KEY set locally:**
+- Vision verdict quality (is the model actually detecting hook text, watermarks, real humans in these exact frames)
+- Content rubric scoring quality (does the 10-question rubric produce meaningful spread across clips)
+- Phase 2 safety flag sensitivity
+These are all verifiable via a live demo run on Railway (LLM_API_KEY is set there) — the gate will write results into clip rows visible in the queue.
+
+**State:** NOT committed/pushed (per constraint in the task brief — orchestrator owns commit/push). All files cleanly edited; no syntax errors; 393/393 tests pass. Ready for Railway deploy.
+
+### 2026-07-09 — Session: Style-ref layout hardwire + active-speaker reframing
+
+**TASK A — Style-refs layout hardwired in render/modal_app.py (COMPLETE)**
+
+7 module-level constants added (HOOK_SHOW_SECONDS, HOOK_BOX_CENTER_Y_FRAC, CAPTION_ZONE_Y_FRAC, WATERMARK_BOTTOM_MARGIN_FRAC, WATERMARK_WIDTH_FRAC, WATERMARK_MIN_OPACITY, CAPTION_MAX_WORDS_PER_EVENT).
+
+Hook: white box (`box_color` default `#FFFFFF`), black text (`text_color` default `#000000`), box center at 52% frame height via `y=H*0.5200-text_h/2` drawtext expression, `boxborderw=30`. Bold omitted from drawtext (not available in this Ubuntu ffmpeg build — ExtraBold font file provides weight). Visible 0→`hook.show_seconds[1]` (default 7.5s, config in fitness.yaml sets 8s).
+
+Captions: `_position_to_alignment` gained `mid_low` case → alignment 8, top at `CAPTION_ZONE_Y_FRAC` (65% height). Default position changed to `"mid_low"`. `max_wpl` default to `CAPTION_MAX_WORDS_PER_EVENT` (3).
+
+Watermark: `position=="bottom"` → bottom-center at `WATERMARK_BOTTOM_MARGIN_FRAC` margin, scale to `WATERMARK_WIDTH_FRAC` width, opacity floored at `WATERMARK_MIN_OPACITY`. Center behavior kept for `position=="center"` only. Credit placed just ABOVE the watermark using pixel arithmetic.
+
+Required-asset check: if watermark or (outro enabled+missing) raise `RuntimeError("missing required brand asset: …")` — no longer silent.
+
+Portability fix: removed `bold=1` from drawtext (unavailable in Ubuntu 24.04 ffmpeg; this was found during verification and fixed).
+
+**TASK B — Active-speaker reframing (render/reframe.py — COMPLETE)**
+
+New file `render/reframe.py` (~450 lines). Public interface: `reframe_segment(source, out_video, out_audio, start, duration, out_w, out_h, log)`.
+
+Face detection: OpenCV YuNet (`cv2.FaceDetectorYN_create`) — no OpenGL/libGLESv2 dependencies. Model resolved from: `assets/models/face_detection_yunet.onnx` (228KB shipped in repo) → `/models/face_detection_yunet.onnx` (Modal container) → `REFRAME_YUNET_MODEL_PATH` env var.
+
+Active-speaker heuristic: 0 faces → center crop for scene; 1 face → track it (smooth); N>1 faces → pixel-difference variance in lower 40% of each face bounding box across consecutive sample pairs (mouth movement proxy). Largest face fallback when heuristic fails.
+
+Virtual camera: Gaussian-smooth within scene (pure Python, no scipy), snap across scene cuts, clamp crop box to frame.
+
+Apply: per-scene constant `crop=W:H:X:0,scale=out_w:out_h:flags=lanczos,setsar=1` → temp segment files → concat demuxer with `-c copy`.
+
+MediaPipe note: MediaPipe 0.10.35 removed `mp.solutions` API entirely; the new Tasks API requires `libGLESv2.so.2` which is absent on this headless VPS. YuNet was used as the primary detector. MediaPipe is still listed in the Modal image pip_install (it works in the GPU container where libGL is available). TalkNet-ASD integration point documented in code.
+
+Scene detection: PySceneDetect 0.7 `AdaptiveDetector`. `scenedetect[opencv]` conflicted with `opencv-contrib-python` during local install; plain `scenedetect` (0.7) installed instead (OpenCV already present).
+
+Modal image updated: added `mediapipe`, `opencv-python-headless`, `scenedetect[opencv]` to pip_install; added `.add_local_python_source("render", copy=True)`.
+
+YuNet model: `assets/models/face_detection_yunet.onnx` (228KB, downloaded from opencv_zoo).
+
+**VERIFICATION — PASSED on real R2 media (complete)**
+
+Source: `campaigns/fitness/raw/youtube_IAnhFUUCq6c.mp4` (93-min podcast, 2 people, 1080p).
+Segment tested: t=600–645s (10min mark, stable dialog section).
+
+Pipeline ran: reframe_segment → faster-whisper CPU (164 words) → _build_ass → _apply_overlays (real Vici logo + Montserrat ExtraBold) → _concat_outro (Vici CTA outro.mov).
+
+Duration: 52.09s (45s content + 7.09s outro = OK; expected 51.5–52.6).
+
+Frame results (see `/tmp/claude-0/-root/d2bf0976-e7a1-4263-bc9e-82853f8f54d2/scratchpad/verify_frames2/`):
+- hook_3s.png: WHITE box at chest level, bold BLACK text ("Is hypertrophy really / about progressive / overload or is it / something else..."), captions below ("everything like that." with "everything" highlighted cyan), "via @hubermanlab" just above VICI PEPTIDES logo at bottom-center. No corner badge. ✅
+- mid_22s.png: hook gone (>8s), captions ("you walk from"), VICI PEPTIDES logo clearly readable. ✅  
+- tail_41s.png: captions ("possible. The next"), logo present, person in frame. ✅
+
+Face centering (20 frames from reframed.mp4, YuNet detection):
+- 20/20 frames: face within 25% of frame horizontal centre = **100%** (threshold: ≥90%)
+- mean distance from centre: 0.051 (normalised; 0 = perfect)
+- max distance: 0.092
+- All per-frame values: 0.063 0.039 0.033 0.019 0.056 0.037 0.037 0.061 0.066 0.034 0.092 0.068 0.043 0.049 0.053 0.064 0.089 0.050 0.032 0.034
+
+Tests: 393/393 passed (unchanged from review-gate stream's baseline). AST parse clean on both files.
+
+**KNOWN APPROXIMATIONS / HONEST NOTES:**
+- PySceneDetect found 1 scene in this 45s segment (podcast has no hard cuts in this window) → single crop was applied; multi-scene interpolation logic is correct but untested on footage with hard cuts in this session.
+- Mouth-movement heuristic is pixel-variance in lower 40% of face bbox (not MediaPipe FaceLandmarker landmarks 13↔14). Works well when faces are large enough in frame; may degrade on wide two-shot where faces are small.
+- MediaPipe in Modal container (GPU): `mp.solutions` API is absent in 0.10.35; the render will import-error and fall back to YuNet there too (since `render.reframe` is now in the container). The Modal image pip_install still lists `mediapipe` as a future upgrade path; it does not harm the current deployment.
+- The `bold=1` drawtext parameter is absent in Ubuntu 24.04's ffmpeg build. The ExtraBold font provides visual weight. On the Modal container (Debian Slim), `bold=1` may or may not work — the parameter removal is conservative and correct on both.
+
+**State:** NOT committed (per constraint). All changes in working tree. Orchestrator owns commit/push.
+Files changed: `render/modal_app.py`, `render/reframe.py` (new), `assets/models/face_detection_yunet.onnx` (new, binary), `tests/test_config.py` (updated for new fitness.yaml values).

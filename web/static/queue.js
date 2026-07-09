@@ -120,10 +120,17 @@ export function initQueue(container, ctx) {
   filterWrap.id = 'queue-filter-wrap';
   container.appendChild(filterWrap);
 
-  // Cards grid
-  const cardsEl = document.createElement('div');
-  cardsEl.id = 'queue-cards';
-  container.appendChild(cardsEl);
+  // "Ready to review" section
+  const readySection = document.createElement('div');
+  readySection.id = 'queue-ready-section';
+  container.appendChild(readySection);
+
+  // "Didn't pass review" section (hidden when empty)
+  const failSection = document.createElement('div');
+  failSection.id = 'queue-fail-section';
+  failSection.className = 'queue-fail-section';
+  failSection.style.display = 'none';
+  container.appendChild(failSection);
 
   _renderFilters();
   _load();
@@ -164,7 +171,9 @@ async function _load() {
     names.forEach((n) => { if (!_campaigns.includes(n)) _campaigns.push(n); });
     _renderFilters();
 
-    _ctx.onBadge(_clips.length);
+    // Badge shows only ready/pending clips (not didnt_pass failures)
+    const badgeCount = _clips.filter((c) => c.gate_status !== 'didnt_pass').length;
+    _ctx.onBadge(badgeCount);
     _renderCards();
   } catch (err) {
     if (err.status === 401) { _ctx.onUnauthorized(); return; }
@@ -271,12 +280,18 @@ function _visibleClips() {
 // ── Cards render ──────────────────────────────────────────────────────────────
 
 async function _renderCards() {
-  const cardsEl = document.getElementById('queue-cards');
-  if (!cardsEl) return;
+  const readySection = document.getElementById('queue-ready-section');
+  const failSection  = document.getElementById('queue-fail-section');
+  if (!readySection) return;
 
   const visible = _visibleClips();
 
-  if (visible.length === 0) {
+  // Partition into ready (gate_status: ready/overridden/pending) vs didnt_pass
+  const readyClips = visible.filter((c) => c.gate_status !== 'didnt_pass');
+  const failClips  = visible.filter((c) => c.gate_status === 'didnt_pass');
+
+  // ── Ready section ─────────────────────────────────────────────────────────
+  if (readyClips.length === 0) {
     try {
       const stats = await _ctx.mockFetch(
         () => _ctx.api.getStats(),
@@ -285,16 +300,42 @@ async function _renderCards() {
       const nextRun = stats.next_run_at
         ? `Next run: ${_fmtSlot(stats.next_run_at)}`
         : 'No run scheduled.';
-      cardsEl.innerHTML = _emptyStateHTML(nextRun);
+      readySection.innerHTML = _emptyStateHTML(nextRun);
     } catch {
-      cardsEl.innerHTML = _emptyStateHTML('No clips waiting.');
+      readySection.innerHTML = _emptyStateHTML('No clips waiting.');
     }
+  } else {
+    readySection.innerHTML = '';
+    const sectionHeader = document.createElement('h2');
+    sectionHeader.className = 'queue-section-header';
+    sectionHeader.textContent = 'Ready to review';
+    readySection.appendChild(sectionHeader);
+    const grid = document.createElement('div');
+    grid.id = 'queue-cards';
+    readySection.appendChild(grid);
+    readyClips.forEach((clip, idx) => {
+      grid.appendChild(_buildCard(clip, idx));
+    });
+  }
+
+  // ── Didn't pass section ───────────────────────────────────────────────────
+  if (!failSection) return;
+  if (failClips.length === 0) {
+    failSection.style.display = 'none';
     return;
   }
 
-  cardsEl.innerHTML = '';
-  visible.forEach((clip, idx) => {
-    cardsEl.appendChild(_buildCard(clip, idx));
+  failSection.style.display = '';
+  failSection.innerHTML = '';
+  const failHeader = document.createElement('h2');
+  failHeader.className = 'queue-section-header queue-section-header--fail';
+  failHeader.textContent = "Didn't pass review";
+  failSection.appendChild(failHeader);
+  const failGrid = document.createElement('div');
+  failGrid.className = 'queue-cards-fail';
+  failSection.appendChild(failGrid);
+  failClips.forEach((clip, idx) => {
+    failGrid.appendChild(_buildFailCard(clip, idx));
   });
 }
 
@@ -417,6 +458,98 @@ function _buildCard(clip, idx) {
   el.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _openReview(clip, el); }
   });
+
+  return el;
+}
+
+// ── Didn't-pass card builder ──────────────────────────────────────────────────
+
+function _buildFailCard(clip, idx) {
+  const kind  = clip.kind  || 'clip';
+  const score = clip.score ?? 0;
+  const { cls: meterCls } = _scoreMeta(score);
+
+  const el = document.createElement('div');
+  el.className = 'clip-card clip-card--fail';
+  el.dataset.id   = clip.id;
+  el.dataset.kind = kind;
+
+  // Build a plain-language summary from gate_reasons
+  const failReasons = (clip.gate_reasons || [])
+    .filter((r) => !r.pass)
+    .map((r) => _escHtml(r.reason || r.check))
+    .join('<br>');
+
+  const formulaLabel = clip.formula_score != null
+    ? `<span class="chip chip-amber">Score ${Math.round(clip.formula_score * 100)}/100</span>`
+    : '';
+
+  // Thumbnail or placeholder
+  let thumbHtml;
+  if (kind === 'meme' && clip.thumb_url) {
+    thumbHtml = `<img class="clip-thumb clip-thumb--fail" src="${_escHtml(clip.thumb_url)}" alt="Meme preview" loading="lazy">`;
+  } else if (clip.thumb_url) {
+    thumbHtml = `<img class="clip-thumb clip-thumb--fail" src="${_escHtml(clip.thumb_url)}" alt="Clip thumbnail" loading="lazy">`;
+  } else {
+    thumbHtml = `<div class="clip-video-placeholder" style="aspect-ratio:9/16;max-height:120px" aria-hidden="true">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+    </div>`;
+  }
+
+  el.innerHTML = `
+    <div class="fail-card-inner">
+      <div class="fail-card-thumb">${thumbHtml}</div>
+      <div class="fail-card-body">
+        <div class="fail-card-hook">${_escHtml(clip.hook || '(no hook)')}</div>
+        <div class="fail-card-meta">
+          ${formulaLabel}
+          ${clip.campaign ? `<span class="chip">${_escHtml(clip.campaign)}</span>` : ''}
+        </div>
+        <details class="fail-why" ${failReasons ? '' : 'hidden'}>
+          <summary class="fail-why-summary">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            Why didn't it pass?
+          </summary>
+          <div class="fail-why-reasons">${failReasons || 'Gate reason not recorded.'}</div>
+        </details>
+        <div class="fail-card-actions">
+          <button class="btn btn-ghost btn-sm fail-override-btn" data-id="${_escHtml(clip.id)}"
+            aria-label="Override gate — move to review queue">
+            Override
+          </button>
+        </div>
+      </div>
+    </div>`;
+
+  // Override button handler
+  const overrideBtn = el.querySelector('.fail-override-btn');
+  if (overrideBtn) {
+    overrideBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      overrideBtn.disabled = true;
+      overrideBtn.textContent = '…';
+      try {
+        await _ctx.mockFetch(
+          () => _ctx.api.overrideGate(clip.id),
+          () => ({ gate_status: 'overridden' })
+        );
+        // Update local state and re-render
+        const target = _clips.find((c) => c.id === clip.id);
+        if (target) target.gate_status = 'overridden';
+        _ctx.toast('Clip moved to review queue', 'success');
+        _renderCards();
+      } catch (err) {
+        overrideBtn.disabled = false;
+        overrideBtn.textContent = 'Override';
+        if (err.status === 401) { _ctx.onUnauthorized(); return; }
+        _ctx.toast('Override failed: ' + err.message, 'error');
+      }
+    });
+  }
 
   return el;
 }

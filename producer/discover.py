@@ -378,22 +378,88 @@ def discover_instagram(
     return unique
 
 
+def _is_excluded_by_keywords(
+    candidate: dict[str, Any],
+    exclude_keywords: list[str],
+) -> bool:
+    """Return True if the candidate title/caption matches any excluded keyword.
+
+    Comparison is case-insensitive substring match.
+    """
+    if not exclude_keywords:
+        return False
+    title = (candidate.get("title") or "").lower()
+    for kw in exclude_keywords:
+        if kw.lower() in title:
+            log.debug(
+                "Candidate excluded by keyword filter",
+                extra={"source_id": candidate.get("source_id"), "keyword": kw},
+            )
+            return True
+    return False
+
+
 def discover_all(
     campaign_cfg: "CampaignConfig",
     apify: "Apify",
 ) -> list[dict]:
     """
-    Run all configured platforms and return the combined, deduplicated candidate list.
+    Run all configured platforms, apply exclusion filters, and return the
+    combined deduplicated candidate list.
+
+    Applies (case-insensitive, substring):
+      - sources.youtube.exclude_channels: filter by author_handle on YouTube candidates
+      - sources.exclude_keywords:         filter by title across all platforms
     """
     all_candidates: list[dict] = []
     all_candidates.extend(discover_youtube(campaign_cfg, apify))
     all_candidates.extend(discover_tiktok(campaign_cfg, apify))
     all_candidates.extend(discover_instagram(campaign_cfg, apify))
 
+    # ── Exclusion filters ─────────────────────────────────────────────────────
+    exclude_keywords: list[str] = []
+    try:
+        exclude_keywords = list(campaign_cfg.sources.exclude_keywords or [])
+    except AttributeError:
+        pass
+
+    yt_exclude_channels: list[str] = []
+    try:
+        yt_cfg = campaign_cfg.sources.youtube
+        if yt_cfg is not None:
+            yt_exclude_channels = list(yt_cfg.exclude_channels or [])
+    except AttributeError:
+        pass
+
+    before_filter = len(all_candidates)
+    filtered: list[dict] = []
+    for c in all_candidates:
+        # YouTube channel exclusion
+        if c.get("platform") == "youtube" and yt_exclude_channels:
+            handle = (c.get("author_handle") or "").lower()
+            if any(exc.lower() in handle for exc in yt_exclude_channels):
+                log.debug(
+                    "YouTube candidate excluded by channel filter",
+                    extra={"source_id": c.get("source_id"), "handle": handle},
+                )
+                continue
+        # Cross-platform keyword exclusion
+        if _is_excluded_by_keywords(c, exclude_keywords):
+            continue
+        filtered.append(c)
+
+    if before_filter != len(filtered):
+        log.info(
+            "Discovery exclusion filters removed %d candidates",
+            before_filter - len(filtered),
+            extra={"campaign": campaign_cfg.name,
+                   "before": before_filter, "after": len(filtered)},
+        )
+
     # Final global dedup by source_id (unlikely but safe)
     seen: set[str] = set()
     unique = []
-    for c in all_candidates:
+    for c in filtered:
         if c["source_id"] not in seen:
             seen.add(c["source_id"])
             unique.append(c)

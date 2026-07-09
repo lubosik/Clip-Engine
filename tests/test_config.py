@@ -44,14 +44,14 @@ def test_fitness_sources():
     cfg = load_campaign(FITNESS_YAML, strict_assets=False)
 
     assert cfg.sources.youtube is not None
-    assert "hypertrophy science explained" in cfg.sources.youtube.search_terms
-    assert "protein intake muscle growth" in cfg.sources.youtube.search_terms
-    assert "progressive overload podcast" in cfg.sources.youtube.search_terms
+    # Search terms were updated to target podcast footage (real-person interviews only)
+    assert "hypertrophy podcast interview" in cfg.sources.youtube.search_terms
+    assert "strength training podcast huberman" in cfg.sources.youtube.search_terms
     assert cfg.sources.youtube.min_view_count == 20000
     assert cfg.sources.youtube.uploaded_within == "year"
 
     assert cfg.sources.tiktok is not None
-    assert "fitnesstips" in cfg.sources.tiktok.hashtags
+    assert "fitnesspodcast" in cfg.sources.tiktok.hashtags
     assert "hypertrophy" in cfg.sources.tiktok.hashtags
 
     assert cfg.sources.instagram is not None
@@ -82,12 +82,15 @@ def test_fitness_template():
     assert t.resolution == [1080, 1920]
     assert t.captions.style == "word_by_word"
     assert t.captions.highlight_color == "#00E5FF"
-    assert t.captions.max_words_per_line == 4
+    assert t.captions.max_words_per_line == 3   # short CapCut-style chunks (updated spec)
+    assert t.captions.position == "mid_low"       # caption zone below the hook box
     assert t.hook.enabled is True
     assert t.hook.show_seconds == [0, 8]
-    assert t.watermark.position == "center"
-    assert abs(t.watermark.opacity - 0.18) < 1e-9
-    assert t.corner_badge.position == "top_right"
+    assert t.hook.box_color == "#FFFFFF"          # white box per style refs
+    assert t.hook.text_color == "#000000"         # black text per style refs
+    assert t.watermark.position == "bottom"       # bottom-center, clearly readable
+    assert abs(t.watermark.opacity - 0.9) < 1e-9  # high opacity (updated spec)
+    assert t.corner_badge.image is None            # no corner badge per style refs
     assert t.outro.enabled is True
     assert t.outro.audio == "keep"
 

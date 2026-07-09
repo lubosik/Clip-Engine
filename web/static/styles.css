@@ -2459,3 +2459,177 @@ input[type="range"]::-moz-range-thumb {
     background: rgba(14, 14, 28, 0.95) !important;
   }
 }
+
+/* ── Review-gate queue sections ──────────────────────────────────────────────
+   "Ready to review" and "Didn't pass review" sections in the queue view.
+   The fail section uses an amber tint to distinguish it from the main queue.
+── */
+
+.queue-section-header {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 20px 0 8px 2px;
+  margin: 0;
+  border: none;
+}
+
+.queue-section-header--fail {
+  color: var(--amber);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.queue-section-header--fail::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 6px var(--amber-glow);
+  flex-shrink: 0;
+}
+
+/* Fail section container — subtle amber floor glow */
+.queue-fail-section {
+  border-top: 1px solid var(--amber-border);
+  margin-top: 16px;
+  padding-top: 4px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 180, 84, 0.04) 0%,
+    transparent 120px
+  );
+  border-radius: 0 0 var(--r) var(--r);
+}
+
+/* Grid for fail cards — same layout as main queue but compacter */
+.queue-cards-fail {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  padding: 0 0 20px;
+}
+
+/* Fail card — amber-tinted glass panel, more compact than a full clip card */
+.clip-card--fail {
+  border-radius: var(--r);
+  border: 1px solid var(--amber-border);
+  background: rgba(255, 180, 84, 0.06);
+  backdrop-filter: blur(12px) saturate(1.2);
+  -webkit-backdrop-filter: blur(12px) saturate(1.2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 180, 84, 0.14),
+    0 2px 12px rgba(0, 0, 0, 0.30);
+  overflow: hidden;
+  cursor: default;
+  transition: border-color 0.18s ease;
+}
+
+.clip-card--fail:hover {
+  border-color: var(--amber);
+}
+
+.fail-card-inner {
+  display: flex;
+  gap: 10px;
+  padding: 10px;
+}
+
+.fail-card-thumb {
+  flex-shrink: 0;
+  width: 56px;
+}
+
+.clip-thumb--fail {
+  width: 56px;
+  height: 100px;
+  object-fit: cover;
+  border-radius: calc(var(--r) - 4px);
+  opacity: 0.75;
+}
+
+.fail-card-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fail-card-hook {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.35;
+  /* Clamp to 3 lines */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.fail-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+/* Why-didn't-it-pass disclosure */
+.fail-why {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.fail-why-summary {
+  cursor: pointer;
+  color: var(--amber-dim);
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+  font-weight: 500;
+  font-size: 0.72rem;
+}
+
+.fail-why-summary::-webkit-details-marker { display: none; }
+
+.fail-why-summary:hover {
+  color: var(--amber);
+}
+
+.fail-why-reasons {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: rgba(255, 180, 84, 0.07);
+  border-radius: 6px;
+  border-left: 2px solid var(--amber-border);
+  line-height: 1.55;
+  color: var(--text-dim);
+  font-size: 0.71rem;
+}
+
+.fail-card-actions {
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.chip-amber {
+  background: var(--amber-bg);
+  color: var(--amber);
+  border: 1px solid var(--amber-border);
+}
+
+/* ── Reduced-motion overrides for fail card ──────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .clip-card--fail {
+    transition: none;
+  }
+}

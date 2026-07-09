@@ -43,9 +43,12 @@ from core.logging import configure_logging
 configure_logging()
 log = logging.getLogger(__name__)
 
-# Demo runs stop after this many clips (spec §9). Production has no early stop
-# here — it is bounded by the spend guard and daily caps instead.
+# Demo runs stop after this many READY clips (gate_status='ready').
+# Production has no early stop — it is bounded by the spend guard and daily caps.
 DEMO_CLIP_TARGET = 3
+# Hard cap on total renders per demo run regardless of gate outcome.
+# Prevents unbounded spend when gate keeps failing clips.
+DEMO_RENDER_CAP = 10
 
 
 def _build_caption(template: str, hook: str, source_handle: str, hashtags: list[str]) -> str:
@@ -233,12 +236,48 @@ def _process_source(
                     caption=caption,
                     destination_channels=campaign_cfg.destinations.postiz_channels,
                     status="pending_review",
+                    # gate_status defaults to 'pending' until run_gate completes
                 )
                 session.add(clip_row)
                 session.flush()  # get the id
 
+                # ── AI Review Gate ────────────────────────────────────────────
+                gate_status = "pending"
+                try:
+                    from producer.review_gate import run_gate
+                    from core.models import Transcript as TranscriptModel
+                    tr_row = session.query(TranscriptModel).filter_by(source_id=source_id).first()
+                    tr_segments = tr_row.segments if tr_row else None
+                    gate_result = run_gate(
+                        clip_row=clip_row,
+                        video_path_or_r2=dispatch_result.file_path or "",
+                        transcript_segments=tr_segments,
+                        campaign_cfg=campaign_cfg,
+                        session=session,
+                    )
+                    clip_row.gate_status = gate_result.gate_status
+                    clip_row.gate_reasons = gate_result.gate_reasons
+                    clip_row.formula_score = gate_result.formula_score
+                    gate_status = gate_result.gate_status
+                    log.info(
+                        "Gate result for clip %d: %s (formula_score=%s)",
+                        clip_row.id,
+                        gate_result.gate_status,
+                        f"{gate_result.formula_score:.3f}" if gate_result.formula_score is not None else "N/A",
+                    )
+                except Exception as gate_exc:
+                    log.warning(
+                        "Gate check failed (non-fatal); clip stays pending: %s",
+                        gate_exc,
+                    )
+                    # gate_status stays 'pending' — already the model default
+
                 new_ranges.append([clip_candidate["start"], clip_candidate["end"]])
-                inserted_clips.append({"clip_id": clip_row.id, "source_id": source_id})
+                inserted_clips.append({
+                    "clip_id": clip_row.id,
+                    "source_id": source_id,
+                    "gate_status": gate_status,
+                })
 
                 log.info(
                     "Clip rendered and queued",
@@ -439,12 +478,14 @@ def run_campaign(
 
     cpu_count = os.cpu_count() or 2
 
-    # Demo runs target a small number of clips (spec §9: "produce 3 clips";
-    # "don't hunt for 100"). Stop processing further sources once we have enough,
-    # so a demo doesn't grind transcripts for every discovered candidate.
+    # Demo runs target DEMO_CLIP_TARGET *ready* clips (gate_status='ready').
+    # All renders (regardless of gate outcome) count toward DEMO_RENDER_CAP
+    # to prevent unbounded spend when the gate keeps failing clips.
     clip_target = DEMO_CLIP_TARGET if effective_mode == "demo" else None
+    render_cap = DEMO_RENDER_CAP if effective_mode == "demo" else None
 
-    total_clips = 0
+    total_renders = 0   # every clip rendered (regardless of gate status)
+    total_ready = 0     # clips that passed the gate (gate_status=='ready')
     sources_processed = 0
     for source in to_process:
         # Each source gets its own session to isolate failures
@@ -458,16 +499,30 @@ def run_campaign(
                 run_mode=effective_mode,
                 max_modal_spend=max_modal_spend,
             )
-            total_clips += len(clips)
             sources_processed += 1
+            for c in clips:
+                total_renders += 1
+                if c.get("gate_status") == "ready":
+                    total_ready += 1
 
-        if clip_target is not None and total_clips >= clip_target:
+        if clip_target is not None and total_ready >= clip_target:
             log.info(
-                "Demo clip target reached; stopping source processing",
-                extra={"campaign": campaign_name, "clips": total_clips,
-                       "target": clip_target},
+                "Demo ready-clip target reached; stopping source processing",
+                extra={"campaign": campaign_name, "ready": total_ready,
+                       "renders": total_renders, "target": clip_target},
             )
             break
+
+        if render_cap is not None and total_renders >= render_cap:
+            log.warning(
+                "Demo render cap (%d) reached; stopping to bound spend "
+                "(only %d clips passed the gate — re-run to get more)",
+                render_cap, total_ready,
+            )
+            break
+
+    # Keep backwards-compat: total_clips = all renders for log message
+    total_clips = total_renders
 
     run_end = datetime.now(tz=timezone.utc)
     elapsed = (run_end - run_start).total_seconds()

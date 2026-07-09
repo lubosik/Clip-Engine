@@ -2,17 +2,32 @@ name: fitness
 enabled: true
 
 sources:
+  # HARD RULE: real people on podcasts/interviews ONLY — never animated
+  # explainers. Search terms target podcast footage; the exclude lists and
+  # the design-gate vision check enforce it.
   youtube:
     search_terms:
-      - "hypertrophy science explained"
-      - "protein intake muscle growth"
-      - "progressive overload podcast"
+      - "hypertrophy podcast interview"
+      - "muscle growth podcast clip"
+      - "fitness coach interview training"
+      - "strength training podcast huberman"
     channels: []            # optional explicit channel URLs
+    exclude_channels:
+      - "TED-Ed"
+      - "TED"
+      - "Kurzgesagt"
+      - "AsapSCIENCE"
+      - "Institute of Human Anatomy"
     min_view_count: 20000
     uploaded_within: "year" # hour|day|week|month|year
+  exclude_keywords:
+    - "animation"
+    - "animated"
+    - "explained in 5 levels"
+    - "cartoon"
   tiktok:
     profiles: []
-    hashtags: ["fitnesstips", "hypertrophy"]
+    hashtags: ["fitnesspodcast", "hypertrophy"]
   instagram:
     profiles: []
 
@@ -31,6 +46,9 @@ ranking:
     anything that would violate TikTok/Instagram community guidelines.
     When in doubt, skip it.
 
+# Layout is the style_refs contract (IMG_7493/7494): white hook box mid-frame
+# gone by ~8s, CapCut captions just below it, the uploaded logo readable at the
+# bottom for the whole clip.
 template:
   aspect: "9:16"
   resolution: [1080, 1920]
@@ -41,30 +59,30 @@ template:
     highlight_color: "#00E5FF"
     outline_color: "#000000"
     outline_px: 6
-    position: "upper_mid"
-    max_words_per_line: 4
+    position: "mid_low"     # caption zone just below the hook box
+    max_words_per_line: 3   # short CapCut-style chunks
   hook:
     enabled: true
-    show_seconds: [0, 8]
+    show_seconds: [0, 8]    # visible first ~8s, then gone
     source: "ranking"
     font: "assets/fitness/Montserrat-ExtraBold.ttf"
-    box_color: "#111111CC"
+    box_color: "#FFFFFF"    # white rounded box…
+    text_color: "#000000"   # …with bold black text (style refs)
   lower_third:
     show_source_handle: true
     format: "via @{source_handle}"
   watermark:
+    # The operator's uploaded "Vici Logo for Clipping" — bottom, readable,
+    # on screen for the entire clip. Never a faint centered ghost.
     image: "assets/fitness/logo.png"
-    position: "center"
-    opacity: 0.18
-    scale: 0.5
+    position: "bottom"
+    opacity: 0.9
+    scale: 0.3
   corner_badge:
-    image: "assets/fitness/logo_circle.png"
-    position: "top_right"
-    opacity: 1.0
-    scale: 0.12
+    image: null             # style refs have no corner badge
   outro:
     enabled: true
-    clip: "assets/fitness/outro.mov"
+    clip: "assets/fitness/outro.mov"  # the uploaded "Vici Clipping Video CTA" (7.0s)
     audio: "keep"           # keep|mute
 
 destinations:

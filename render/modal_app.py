@@ -1,41 +1,63 @@
 """
 render/modal_app.py — Modal serverless GPU worker for clip rendering.
 
-Self-contained: NO imports from this repository.  Modal ships only this
-single file into the container; all helpers are inlined here.
+Self-contained except for render.reframe (mounted at deploy time via
+image.add_local_python_source("render")).  All other helpers are inlined here.
 
 Pipeline
 --------
 1.  Source acquisition — pull from R2 (job["source"]["r2_raw_key"]) or
     download from URL (job["source"]["url"]).
 2.  Asset downloads — font, watermark, badge, outro from R2 keys in
-    job["asset_keys"]; any may be None (skipped gracefully).
-3.  Cut + center-crop reframe (one ffmpeg pass):
-    ``scale=-2:1920:flags=lanczos,crop=1080:1920``
-    NOTE: face-aware reframing (mediapipe) is intentionally omitted from the
-    GPU container — center-crop is used instead, consistent with §F of the
-    master spec.
+    job["asset_keys"].  Watermark and (when enabled) outro are REQUIRED;
+    missing or failed downloads raise RuntimeError so the producer records
+    a hard error rather than silently producing a clip without branding.
+3.  Cut + active-speaker reframe (render.reframe.reframe_segment):
+    face-aware 9:16 crop using MediaPipe + PySceneDetect, with center-crop
+    fallback when no faces are found.
 4.  WAV extraction (16-kHz mono) for faster-whisper.
 5.  Caption timing — use job["words"] (source-relative) if provided;
     otherwise run faster-whisper "small" on the cut WAV.  Words are
     converted to cut-relative (subtract job["start"]) before ASS generation.
-6.  ASS karaoke captions — word-by-word highlight, built from inlined logic
-    adapted from producer/render/captions.py.
+6.  ASS karaoke captions — CapCut-style word-by-word highlight in events
+    of ≤CAPTION_MAX_WORDS_PER_EVENT (3) words.  Positioned at
+    CAPTION_ZONE_Y_FRAC (~65% of frame height), below the hook box.
 7.  Overlay pass (single ffmpeg filter_complex_script):
     - subtitles (ASS with fontsdir)
-    - drawtext hook (enabled for job["template"]["hook"]["show_seconds"] window)
-    - watermark overlay (center, opacity-controlled)
-    - corner badge overlay (positioned by name)
-    - "via @handle" credit drawtext at bottom
+    - drawtext hook: white box, BLACK bold text, box CENTER at
+      HOOK_BOX_CENTER_Y_FRAC (~52%) of frame, visible 0 → HOOK_SHOW_SECONDS.
+    - watermark overlay: bottom-center (position=="bottom") at
+      WATERMARK_BOTTOM_MARGIN_FRAC margin, width WATERMARK_WIDTH_FRAC,
+      opacity ≥ WATERMARK_MIN_OPACITY.  Center behavior kept for
+      position=="center" only.
+    - corner badge overlay (positioned by name).
+    - "via @handle" credit drawtext just ABOVE the watermark.
     Encode: h264_nvenc -preset p5 -cq 23; falls back to libx264 if nvenc
     is unavailable.
-8.  Outro concat (re-encode with same codec) — if outro.enabled and
-    outro.r2_key is set.
+8.  Outro concat (concat FILTER, not demuxer — normalises fps/timebase) —
+    if outro.enabled and outro key is present and downloaded.
 9.  Thumbnail — ffmpeg frame at 1 s (or mid-point for short clips), 480 px wide.
 10. Upload mp4 + jpg to R2 at job["output"]["video_key"] / ["thumb_key"].
 11. Return {status, video_key, thumb_key, gpu, duration_s, error}.
 
 Never raises to the caller — catches all exceptions and returns error status.
+
+Layout reference
+----------------
+Style refs: style_refs/IMG_7493.jpg and IMG_7494.jpg.
+
+HOOK  : white rounded box, bold BLACK text, box center at ~52% frame height
+        (chest level on speaker), visible for 0–7.5 s.
+        Box spans ~85–90% frame width with generous padding (boxborderw=30).
+
+CAPTION: CapCut-style word-by-word, SHORT chunks (≤3 words per event),
+        white bold + strong black outline, positioned at ~65% frame height
+        (just below the hook box, staying there after hook disappears).
+
+WATERMARK: campaign logo, bottom-center, ~30% of frame width, opacity ≥0.85.
+        Clearly readable.  NOT centered, NOT faint.
+
+CREDIT : "via @handle" small text, placed just ABOVE the watermark.
 """
 
 from __future__ import annotations
@@ -54,6 +76,47 @@ from typing import Any
 import modal
 
 # ---------------------------------------------------------------------------
+# Layout constants — derived from style refs IMG_7493.jpg / IMG_7494.jpg.
+# Campaign template config may override via the corresponding keys listed
+# in the docstring below each constant.  These values are the DEFAULTS when
+# the key is absent or None in the template config.
+#
+# hook.show_seconds        → overrides HOOK_SHOW_SECONDS
+# hook.box_color           → overrides box colour (default white)
+# hook.text_color          → overrides text colour (default black)
+# captions.position "mid_low" → maps to CAPTION_ZONE_Y_FRAC
+# captions.max_words_per_line  → overrides CAPTION_MAX_WORDS_PER_EVENT
+# watermark.position "bottom"  → uses WATERMARK_* constants
+# watermark.opacity        → floor-raised to WATERMARK_MIN_OPACITY
+# ---------------------------------------------------------------------------
+
+HOOK_SHOW_SECONDS: tuple[float, float] = (0.0, 7.5)
+"""Default hook visibility window (seconds into clip).  Config: hook.show_seconds."""
+
+HOOK_BOX_CENTER_Y_FRAC: float = 0.52
+"""Fraction of frame height at which the hook box CENTER is placed (~chest level).
+Realised via the drawtext expression: y=H*FRAC-text_h/2."""
+
+CAPTION_ZONE_Y_FRAC: float = 0.65
+"""Fraction of frame height at which caption text TOP is placed.
+Used as MarginV for alignment=8 (top-centre) in the ASS style."""
+
+WATERMARK_BOTTOM_MARGIN_FRAC: float = 0.06
+"""Fraction of frame height used as bottom margin for the watermark overlay."""
+
+WATERMARK_WIDTH_FRAC: float = 0.30
+"""Watermark is scaled so its width = this fraction of frame width (~30%)."""
+
+WATERMARK_MIN_OPACITY: float = 0.85
+"""Minimum watermark alpha passed to colorchannelmixer.  Config value is
+raised to this floor when position is 'bottom'."""
+
+CAPTION_MAX_WORDS_PER_EVENT: int = 3
+"""Maximum words shown in a single caption event (CapCut short-chunk style).
+Config key: captions.max_words_per_line."""
+
+
+# ---------------------------------------------------------------------------
 # Modal image and app definition
 # ---------------------------------------------------------------------------
 
@@ -64,6 +127,10 @@ image = (
         "boto3",
         "faster-whisper",
         "yt-dlp",
+        # Face detection + scene detection for active-speaker reframing
+        "mediapipe",
+        "opencv-python-headless",
+        "scenedetect[opencv]",
         # CUDA runtime libs so ctranslate2 can use the L4/T4 GPU for Whisper.
         # LD_LIBRARY_PATH is patched at runtime in _get_word_timings to point at
         # these pip-installed shared libraries.  The CPU fallback remains in place
@@ -71,6 +138,9 @@ image = (
         "nvidia-cublas-cu12",
         "nvidia-cudnn-cu12",
     )
+    # Include render/reframe.py in the container so modal_app can import it.
+    # copy=True bakes the file into the image layer at deploy time.
+    .add_local_python_source("render", copy=True)
 )
 
 app = modal.App("clip-engine-render", image=image)
@@ -157,6 +227,8 @@ def _pipeline(job: dict, workdir: Path, log: logging.Logger) -> tuple[str, str]:
         campaign, job.get("clip_id"), start, end,
     )
 
+    outro_cfg = tmpl.get("outro", {})
+
     # -- 1. Download source -------------------------------------------------
     source_path = workdir / "source.mp4"
     _download_source(job["source"], source_path, log)
@@ -169,7 +241,22 @@ def _pipeline(job: dict, workdir: Path, log: logging.Logger) -> tuple[str, str]:
     badge_path = _download_asset(asset_keys.get("badge"), asset_dir / "badge.png", log)
     outro_path = _download_asset(asset_keys.get("outro"), asset_dir / "outro.mp4", log)
 
-    # -- 3. Cut + reframe --------------------------------------------------
+    # Validate REQUIRED brand assets — fail loudly rather than silently
+    # producing an unbranded clip.
+    if not wm_path or not wm_path.exists():
+        raise RuntimeError(
+            f"missing required brand asset: watermark "
+            f"(r2_key={asset_keys.get('watermark')!r}). "
+            "Ensure the watermark image is uploaded to R2 before dispatching."
+        )
+    if outro_cfg.get("enabled") and (not outro_path or not outro_path.exists()):
+        raise RuntimeError(
+            f"missing required brand asset: outro "
+            f"(r2_key={asset_keys.get('outro')!r}). "
+            "Ensure the outro video is uploaded to R2 before dispatching."
+        )
+
+    # -- 3. Cut + active-speaker reframe -----------------------------------
     reframed = workdir / "reframed.mp4"
     audio_wav = workdir / "cut.wav"
     res = tmpl.get("resolution", [1080, 1920])
@@ -204,7 +291,6 @@ def _pipeline(job: dict, workdir: Path, log: logging.Logger) -> tuple[str, str]:
     wm_cfg = tmpl.get("watermark", {})
     badge_cfg = tmpl.get("corner_badge", {})
     lt_cfg = tmpl.get("lower_third", {})
-    outro_cfg = tmpl.get("outro", {})
 
     overlaid = workdir / "overlaid.mp4"
     _apply_overlays(
@@ -361,7 +447,7 @@ def _download_asset(
         _r2_client().download_file(_r2_bucket(), r2_key, str(dest))
         return dest
     except Exception as exc:
-        log.warning("Asset download failed (key=%s): %s — skipping", r2_key, exc)
+        log.warning("Asset download failed (key=%s): %s", r2_key, exc)
         return None
 
 
@@ -389,17 +475,29 @@ def _cut_and_reframe(
     out_h: int,
     log: logging.Logger,
 ) -> None:
-    """Cut + center-crop reframe in one pass.
+    """Cut + reframe to 9:16.
 
-    Uses fast seek (-ss before -i) for speed.  Output timestamps are reset
-    to t=0 via -avoid_negative_ts make_zero.  The scale/crop filter converts
-    any input aspect ratio to out_w × out_h (9:16) by scaling to the target
-    height and center-cropping the width.
+    Tries render.reframe.reframe_segment (active-speaker face tracking) first.
+    Falls back to center-crop if the module is unavailable or face detection
+    fails entirely (the reframe module handles its own center-crop fallback
+    internally when no faces are found — this outer fallback covers ImportError).
+
+    The center-crop fallback uses fast seek (-ss before -i) and a single-pass
+    scale/crop to minimise wall time on CPU.
     """
-    # scale=-2:height maintains aspect ratio; crop to exact out_w×out_h.
+    try:
+        # Active-speaker reframing — requires render.reframe (mounted into the
+        # Modal container via image.add_local_python_source("render", copy=True)).
+        from render.reframe import reframe_segment  # noqa: PLC0415
+        log.info("_cut_and_reframe: using active-speaker reframing (render.reframe)")
+        reframe_segment(source, out_video, out_audio, start, duration, out_w, out_h, log)
+        return
+    except ImportError:
+        log.info("_cut_and_reframe: render.reframe not available; falling back to center crop")
+
+    # Center-crop fallback
     # setsar=1 resets the fractional sample-aspect-ratio that scale introduces
-    # when the computed width isn't a perfect integer multiple of the height
-    # (e.g. 3414×1920 → crop to 1080×1920 produces SAR 5120:5121 without this fix).
+    # when the computed width isn't a perfect integer multiple of the height.
     # A non-unit SAR causes the ffmpeg concat filter to reject stream merging.
     scale_filter = (
         f"scale=-2:{out_h}:flags=lanczos,"
@@ -418,7 +516,8 @@ def _cut_and_reframe(
         "-movflags", "+faststart",
         str(out_video),
     ]
-    log.info("Cut+reframe: start=%.2f duration=%.2f → %s", start, duration, out_video.name)
+    log.info("Cut+reframe (center crop): start=%.2f duration=%.2f → %s",
+             start, duration, out_video.name)
     _run_ffmpeg(cmd, "cut+reframe")
 
     # Extract 16-kHz mono WAV for faster-whisper
@@ -529,7 +628,7 @@ def _to_cut_relative(words: list[dict], clip_start: float, clip_end: float) -> l
 
 
 # ---------------------------------------------------------------------------
-# ASS caption generation (inlined from producer/render/captions.py)
+# ASS caption generation (inlined; producer/render/captions.py is not shipped)
 # ---------------------------------------------------------------------------
 
 def _build_ass(
@@ -546,8 +645,9 @@ def _build_ass(
     outline_color = _hex_to_ass_color(cap_cfg.get("outline_color", "#000000"))
     back_color = "&H00000000"
     outline_px = int(cap_cfg.get("outline_px", 6))
-    position = cap_cfg.get("position", "upper_mid")
-    max_wpl = int(cap_cfg.get("max_words_per_line", 4))
+    position = cap_cfg.get("position", "mid_low")  # default to caption zone
+    # Use CAPTION_MAX_WORDS_PER_EVENT (3) as the default for short CapCut-style chunks.
+    max_wpl = int(cap_cfg.get("max_words_per_line", CAPTION_MAX_WORDS_PER_EVENT))
 
     alignment, margin_v = _position_to_alignment(position, out_h)
     lines_of_words = _group_into_lines(words, max_wpl)
@@ -578,7 +678,19 @@ def _hex_to_ass_color(hex_color: str) -> str:
 
 
 def _position_to_alignment(position: str, out_h: int) -> tuple[int, int]:
-    pos = (position or "upper_mid").lower()
+    """Map a position name to (ASS alignment int, margin_v px).
+
+    Positions:
+      mid_low    → alignment 8, top at CAPTION_ZONE_Y_FRAC (caption zone below hook).
+      upper_mid  → alignment 8, top at 38% (legacy; used when config sets upper_mid).
+      center     → alignment 5, margin_v 0.
+      lower_third→ alignment 2, margin from bottom at 15%.
+      lower_mid  → alignment 2, margin from bottom at 28%.
+      bottom     → alignment 2, margin from bottom at 8%.
+    """
+    pos = (position or "mid_low").lower()
+    if pos == "mid_low":
+        return 8, int(out_h * CAPTION_ZONE_Y_FRAC)
     if pos == "upper_mid":
         return 8, int(out_h * 0.38)
     if pos == "center":
@@ -589,7 +701,8 @@ def _position_to_alignment(position: str, out_h: int) -> tuple[int, int]:
         return 2, int(out_h * 0.28)
     if pos == "bottom":
         return 2, int(out_h * 0.08)
-    return 8, int(out_h * 0.38)
+    # Default for any unrecognised position: mid_low (caption zone)
+    return 8, int(out_h * CAPTION_ZONE_Y_FRAC)
 
 
 def _group_into_lines(words: list[dict], max_wpl: int) -> list[list[dict]]:
@@ -753,7 +866,25 @@ def _apply_overlays(
     output: Path,
     log: logging.Logger,
 ) -> None:
-    """Build filtergraph and run the overlay + encode pass."""
+    """Build filtergraph and run the overlay + encode pass.
+
+    Hook layout (per style refs IMG_7493/IMG_7494):
+      - White rounded box (boxcolor=0xFFFFFFFF), bold BLACK text
+      - Box CENTER at HOOK_BOX_CENTER_Y_FRAC of frame height
+        via drawtext expression: y=H*{FRAC}-text_h/2
+      - Generous boxborderw=30 for padding
+      - Visible only during HOOK_SHOW_SECONDS
+
+    Watermark layout (per task spec):
+      - position=="bottom": bottom-center, width=WATERMARK_WIDTH_FRAC*W,
+        opacity=max(cfg, WATERMARK_MIN_OPACITY), y=H-h-{margin_px}
+      - position=="center": legacy center-of-frame behavior (kept for
+        backwards compatibility with existing clips)
+
+    Credit ("via @handle"):
+      - Placed just ABOVE the watermark (bottom layout aware)
+      - Small font, horizontally centered
+    """
     # Inputs list
     inputs: list[str] = ["-i", str(reframed)]
     wm_slot: int | None = None
@@ -774,7 +905,7 @@ def _apply_overlays(
     cur = "[v0]"
     lines.append(f"[0:v]copy{cur}")
 
-    # 1. Subtitles
+    # 1. Subtitles (ASS)
     ass_esc = _escape_fc_path(str(ass_path.resolve()))
     sub_filter = f"subtitles='{ass_esc}'"
     if font_path and font_path.exists():
@@ -784,11 +915,13 @@ def _apply_overlays(
     cur = "[v1]"
     v_idx = 1
 
-    # 2. Hook drawtext
+    # 2. Hook drawtext — white box, BLACK bold text, box centered at ~52% height
     hook_enabled = hook_cfg.get("enabled", True)
-    ss = hook_cfg.get("show_seconds", [0, 8])
-    hook_start = float(ss[0]) if ss else 0.0
-    hook_end = float(ss[1]) if len(ss) > 1 else 8.0
+    # Default show_seconds from module constant (0.0, 7.5); config may override
+    ss = hook_cfg.get("show_seconds", list(HOOK_SHOW_SECONDS))
+    hook_start = float(ss[0]) if ss else HOOK_SHOW_SECONDS[0]
+    hook_end = float(ss[1]) if len(ss) > 1 else HOOK_SHOW_SECONDS[1]
+
     if hook_enabled and hook_text.strip():
         hook_txt_file = workdir / "hook.txt"
         # Wrap at 22 chars/line so individual lines stay within frame width.
@@ -800,26 +933,39 @@ def _apply_overlays(
             if not _hook_lines[-1].endswith("..."):
                 _hook_lines[-1] = _hook_lines[-1].rstrip() + "..."
         hook_txt_file.write_text("\n".join(_hook_lines), encoding="utf-8")
+
         # Fit fontsize: approximate Montserrat ExtraBold average advance ≈ 0.60 × fontsize.
         # Ensure the longest wrapped line stays within 92% of the frame width.
         _longest_line = max(len(l) for l in _hook_lines) if _hook_lines else 1
         _base_fs = max(44, int(out_h * 0.038))
         _fit_fs = int((out_w * 0.92) / (0.60 * max(_longest_line, 1)))
         hook_fontsize = max(min(_base_fs, _fit_fs), 32)
-        hook_y = int(out_h * 0.08)
-        box_color = _html_to_ffmpeg_color(hook_cfg.get("box_color", "#111111CC"))
+
+        # Colors from config; defaults: white box, black text (per style refs)
+        box_color = _html_to_ffmpeg_color(hook_cfg.get("box_color", "#FFFFFF"))
+        text_color = _html_to_ffmpeg_color(hook_cfg.get("text_color", "#000000"))
+
         fontfile_part = ""
         if font_path and font_path.exists():
             fontfile_part = f":fontfile='{_escape_fc_path(str(font_path))}'"
+
+        # Position: box CENTER at HOOK_BOX_CENTER_Y_FRAC of frame height.
+        # drawtext y = top of text block; text_h = rendered text height (all lines).
+        # Box center = y + text_h/2, so y = H*FRAC - text_h/2.
+        hook_y_expr = f"H*{HOOK_BOX_CENTER_Y_FRAC:.4f}-text_h/2"
+
         v_idx += 1
         nxt = f"[v{v_idx}]"
+        # Note: `bold=1` is not supported in all ffmpeg builds.  Boldness is
+        # provided by the Montserrat-ExtraBold fontfile itself; the parameter
+        # is omitted here for portability.
         hook_filter = (
             f"drawtext=textfile='{_escape_fc_path(str(hook_txt_file))}'"
             f"{fontfile_part}"
             f":fontsize={hook_fontsize}"
-            f":fontcolor=white"
-            f":box=1:boxcolor={box_color}:boxborderw=20"
-            f":x=(w-text_w)/2:y={hook_y}"
+            f":fontcolor={text_color}"
+            f":box=1:boxcolor={box_color}:boxborderw=30"
+            f":x=(w-text_w)/2:y={hook_y_expr}"
             f":enable='between(t\\,{hook_start:.3f}\\,{hook_end:.3f})'"
         )
         lines.append(f"{cur}{hook_filter}{nxt}")
@@ -827,14 +973,28 @@ def _apply_overlays(
 
     # 3. Watermark overlay
     if wm_exists and wm_slot is not None:
-        wm_opacity = float(wm_cfg.get("opacity", 0.18))
-        wm_scale = float(wm_cfg.get("scale", 0.5))
-        wm_w = int(out_w * wm_scale)
+        wm_position = (wm_cfg.get("position") or "bottom").lower()
+        wm_opacity_cfg = float(wm_cfg.get("opacity", WATERMARK_MIN_OPACITY))
+
+        if wm_position == "center":
+            # Legacy center-of-frame behavior (kept for backwards compatibility)
+            wm_scale = float(wm_cfg.get("scale", 0.5))
+            wm_w = int(out_w * wm_scale)
+            wm_opacity = wm_opacity_cfg
+            overlay_xy = "(W-w)/2:(H-h)/2"
+        else:
+            # Bottom-center: WATERMARK_WIDTH_FRAC of frame width, opacity floor at MIN
+            wm_w = int(out_w * WATERMARK_WIDTH_FRAC)
+            wm_opacity = max(wm_opacity_cfg, WATERMARK_MIN_OPACITY)
+            # y offset: bottom margin as fixed pixel distance from bottom edge
+            margin_px = int(out_h * WATERMARK_BOTTOM_MARGIN_FRAC)
+            overlay_xy = f"(W-w)/2:H-h-{margin_px}"
+
         v_idx += 1
         nxt = f"[v{v_idx}]"
         lines.append(f"[{wm_slot}:v]format=rgba,colorchannelmixer=aa={wm_opacity:.4f}[wm_a]")
         lines.append(f"[wm_a]scale={wm_w}:-1[wm_s]")
-        lines.append(f"{cur}[wm_s]overlay=(W-w)/2:(H-h)/2{nxt}")
+        lines.append(f"{cur}[wm_s]overlay={overlay_xy}{nxt}")
         cur = nxt
 
     # 4. Badge overlay
@@ -851,13 +1011,30 @@ def _apply_overlays(
         lines.append(f"{cur}[bg_s]overlay={bx}:{by}{nxt}")
         cur = nxt
 
-    # 5. Credit drawtext ("via @handle")
+    # 5. Credit drawtext ("via @handle") — placed just ABOVE the watermark
     show_credit = lt_cfg.get("show_source_handle", True)
     credit_fmt = lt_cfg.get("format", "via @{source_handle}")
     if show_credit and source_handle:
         credit_text = credit_fmt.format(source_handle=source_handle)
         credit_esc = _escape_drawtext(credit_text)
         credit_fs = max(24, int(out_h * 0.018))
+
+        # For bottom-positioned watermark: place credit just above the logo.
+        # Approximate watermark height = WATERMARK_WIDTH_FRAC * out_w
+        # (assumes near-square logo; conservative estimate).
+        wm_position_for_credit = (wm_cfg.get("position") or "bottom").lower()
+        if wm_position_for_credit != "center" and wm_exists:
+            margin_px = int(out_h * WATERMARK_BOTTOM_MARGIN_FRAC)
+            wm_h_approx = int(out_w * WATERMARK_WIDTH_FRAC)
+            # Leave a small gap (credit_fs * 0.3) between credit bottom and watermark top
+            gap = max(8, credit_fs // 3)
+            credit_y = out_h - margin_px - wm_h_approx - credit_fs - gap
+            credit_y = max(credit_y, int(out_h * 0.65))  # never above caption zone
+            credit_y_expr = str(credit_y)
+        else:
+            # Legacy: 88% height (center watermark layout)
+            credit_y_expr = f"h*0.88"
+
         fontfile_part = ""
         if font_path and font_path.exists():
             fontfile_part = f":fontfile='{_escape_fc_path(str(font_path))}'"
@@ -866,7 +1043,7 @@ def _apply_overlays(
         lines.append(
             f"{cur}drawtext=text='{credit_esc}'{fontfile_part}"
             f":fontsize={credit_fs}:fontcolor=white@0.75"
-            f":x=(w-text_w)/2:y=h*0.88{nxt}"
+            f":x=(w-text_w)/2:y={credit_y_expr}{nxt}"
         )
         cur = nxt
 

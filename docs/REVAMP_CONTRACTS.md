@@ -2,6 +2,31 @@
 
 Read MASTER_SPEC.md first. This file pins the cross-stream interfaces so parallel work can't drift. If a stream needs to change a contract here, it must update this file in the same commit.
 
+## 0. DB migration `003_review_gate` (owned by review-gate stream, 2026-07-09)
+
+**`clips` table — additions (migration 003):**
+- `gate_status` VARCHAR(16) NOT NULL DEFAULT `'pending'` — `'pending' | 'ready' | 'didnt_pass' | 'overridden'`
+  - `pending`: gate hasn't run yet, or had a transport error (infra unavailable)
+  - `ready`: passed both Phase 1 (design) and Phase 2 (content); available for human review
+  - `didnt_pass`: failed one or more gate checks; shown in "Didn't pass review" queue section
+  - `overridden`: operator manually moved to the review queue despite failing the gate
+- `gate_reasons` JSONB NULL — list of `{phase: str, check: str, pass: bool, reason: str}` from `run_gate()`
+- `formula_score` FLOAT NULL — 0.0–1.0 average of the §6c 10-question rubric; NULL until Phase 2 runs
+
+**Index added:** `ix_clips_gate_status` on `clips(gate_status)`.
+
+**Downgrade:** drops the three columns permanently (no data migration).
+
+**Gate module:** `producer/review_gate.py` — `run_gate(clip_row, video_path_or_r2, transcript_segments, campaign_cfg, session) -> GateResult`.
+
+**Override endpoint:** `POST /api/clips/{id}/override-gate` (auth'd) — sets `gate_status='overridden'`.
+
+**Style refs for vision prompt:** `campaigns/{campaign}/style_refs/*.jpg` — copied into the campaign directory by the review-gate stream; passed as reference images in the Phase 1 vision call.
+
+**Discovery guard keys (config):**
+- `sources.youtube.exclude_channels: []` — channel name substrings to skip (case-insensitive)
+- `sources.exclude_keywords: []` — title keywords to skip across all platforms (case-insensitive)
+
 ## 1. DB migration `002_revamp_v2` (single migration, owned by Core stream)
 
 **`clips` table — additions:**

@@ -193,6 +193,10 @@ def _clip_to_dict(clip: Any, base_url: str = "") -> dict[str, Any]:
         ),
         "created_at": created_at,
         "status": clip.status,
+        # AI review gate fields (migration 003)
+        "gate_status": getattr(clip, "gate_status", "pending") or "pending",
+        "gate_reasons": getattr(clip, "gate_reasons", None),
+        "formula_score": getattr(clip, "formula_score", None),
         "video_url": f"/api/clips/{clip_id}/video",
         "thumb_url": f"/api/clips/{clip_id}/thumb",
     }
@@ -1024,6 +1028,37 @@ def reject_clip(
         raise HTTPException(
             status_code=500,
             detail={"error": "Failed to reject clip", "code": 500},
+        )
+
+
+@app.post("/api/clips/{clip_id}/override-gate", dependencies=[Depends(require_auth)])
+def override_gate(clip_id: str) -> dict[str, Any]:
+    """POST /api/clips/{id}/override-gate — operator override of the AI gate.
+
+    Sets gate_status to 'overridden' so the clip appears in 'Ready to review'
+    even if it failed Phase 1 or Phase 2 checks.  The gate_reasons are preserved
+    so the operator can still see why the gate originally rejected the clip.
+    """
+    _db_required()
+
+    try:
+        with get_session() as session:
+            clip = session.get(Clip, clip_id)
+            if clip is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error": f"Clip {clip_id} not found", "code": 404},
+                )
+            clip.gate_status = "overridden"
+            session.commit()
+            return {"gate_status": "overridden", "id": clip_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("override_gate failed clip=%s: %s", clip_id, exc, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to override gate", "code": 500},
         )
 
 

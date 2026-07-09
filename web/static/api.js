@@ -105,6 +105,11 @@ export const api = {
     return request('PATCH', `/api/clips/${id}`, { body: { caption } });
   },
 
+  // AI review gate override — moves a failed clip into the review queue
+  overrideGate(id) {
+    return request('POST', `/api/clips/${id}/override-gate`);
+  },
+
   // Campaigns
   getCampaigns() {
     return request('GET', '/api/campaigns');

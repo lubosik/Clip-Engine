@@ -96,6 +96,14 @@ export const clips = [
     created_at: hAgo(0.5),
     video_url: null,
     thumb_url: null,
+    gate_status: 'ready',
+    gate_reasons: [
+      { phase: '1', check: 'resolution', pass: true, reason: '1080x1920 OK' },
+      { phase: '1', check: 'hook_present_in_hook_frame', pass: true, reason: 'Hook text visible in hook frame' },
+      { phase: '1', check: 'real_humans', pass: true, reason: 'Real human speaker detected' },
+      { phase: '2', check: 'formula_score', pass: true, reason: 'Score 0.92 >= threshold 0.60' },
+    ],
+    formula_score: 0.92,
   },
   {
     id: 'mock_clip_002',
@@ -122,6 +130,13 @@ export const clips = [
     created_at: hAgo(0.75),
     video_url: null,
     thumb_url: null,
+    gate_status: 'ready',
+    gate_reasons: [
+      { phase: '1', check: 'resolution', pass: true, reason: '1080x1920 OK' },
+      { phase: '1', check: 'speaker_centered', pass: true, reason: 'Speaker within center region' },
+      { phase: '2', check: 'formula_score', pass: true, reason: 'Score 0.87 >= threshold 0.60' },
+    ],
+    formula_score: 0.87,
   },
   {
     id: 'mock_clip_003',
@@ -148,6 +163,12 @@ export const clips = [
     created_at: hAgo(1),
     video_url: null,
     thumb_url: null,
+    gate_status: 'didnt_pass',
+    gate_reasons: [
+      { phase: '1', check: 'watermark_visible', pass: false, reason: 'No watermark detected in any frame' },
+      { phase: '1', check: 'captions_present', pass: false, reason: 'No word-by-word captions found in mid-clip frame' },
+    ],
+    formula_score: null,
   },
   // Meme fixtures
   {
@@ -159,7 +180,7 @@ export const clips = [
     hook: 'When someone says they train twice a day',
     score: 0.83,
     reason: 'On-brand humor, relatable, no unsafe content',
-    caption: 'When someone says they train twice a day 😂\n\n#gymhumor #fitness #gymtok',
+    caption: 'When someone says they train twice a day \u{1F602}\n\n#gymhumor #fitness #gymtok',
     source: null,
     start: null,
     end: null,
@@ -169,6 +190,9 @@ export const clips = [
     created_at: hAgo(2),
     video_url: null,
     thumb_url: null,
+    gate_status: 'pending',
+    gate_reasons: null,
+    formula_score: null,
     meme_meta: {
       concept: 'relatable gym humor — overtraining archetype',
       classifier_scores: { on_format: 0.91, on_voice: 0.87, on_brand: 0.85, legibility: 0.94, compliance: 0.99 },
@@ -194,6 +218,9 @@ export const clips = [
     created_at: hAgo(3),
     video_url: null,
     thumb_url: null,
+    gate_status: 'pending',
+    gate_reasons: null,
+    formula_score: null,
     meme_meta: {
       concept: 'aspirational training aesthetic with structured caption',
       classifier_scores: { on_format: 0.88, on_voice: 0.80, on_brand: 0.82, legibility: 0.91, compliance: 1.0 },

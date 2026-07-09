@@ -30,6 +30,11 @@ class YouTubeSourceConfig(BaseModel):
     channels: list[str] = Field(default_factory=list)
     min_view_count: int = 0
     uploaded_within: str = "year"  # hour|day|week|month|year
+    # Optional blocklist: channel name substrings to skip (case-insensitive).
+    # Matched against the candidate's author_handle / channelName field.
+    # Example: ["BadChannel", "spammer123"]
+    # Note: do NOT edit campaigns/fitness.yaml; this key is supported in new campaigns.
+    exclude_channels: list[str] = Field(default_factory=list)
 
     @field_validator("uploaded_within")
     @classmethod
@@ -53,6 +58,10 @@ class SourcesConfig(BaseModel):
     youtube: YouTubeSourceConfig | None = None
     tiktok: TikTokSourceConfig | None = None
     instagram: InstagramSourceConfig | None = None
+    # Cross-platform title/caption keyword blocklist (case-insensitive substring match).
+    # Applied during discover_all() to filter candidates from any platform.
+    # Example: ["sponsored", "ad", "promotion"]
+    exclude_keywords: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _at_least_one_source(self) -> "SourcesConfig":
@@ -128,6 +137,8 @@ class HookConfig(BaseModel):
     source: str = "ranking"
     font: str | None = None
     box_color: str = "#111111CC"
+    # Text color drawn inside the box (style refs: black text on a white box)
+    text_color: str = "#FFFFFF"
 
 
 class LowerThirdConfig(BaseModel):

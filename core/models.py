@@ -155,6 +155,13 @@ class Clip(Base):
     aspect: Mapped[str] = mapped_column(String(8), nullable=False, default="9:16")
     # For memes: {concept, classifier_scores, profile_version} (migration 002)
     meme_meta: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # AI review gate (migration 003)
+    # pending | ready | didnt_pass | overridden
+    gate_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    # [{phase, check, pass, reason}] — populated by producer/review_gate.run_gate()
+    gate_reasons: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # 0.0-1.0 average of the §6c 10-question rubric; NULL until Phase 2 runs
+    formula_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     hook: Mapped[str | None] = mapped_column(Text, nullable=True)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -187,6 +194,7 @@ class Clip(Base):
         Index("ix_clips_status", "status"),
         Index("ix_clips_campaign", "campaign"),
         Index("ix_clips_kind", "kind"),
+        Index("ix_clips_gate_status", "gate_status"),
     )
 
 
