@@ -67,3 +67,32 @@ def get_session() -> Generator[Session, None, None]:
         raise
     finally:
         session.close()
+
+
+def ensure_campaign(
+    session: Session,
+    name: str,
+    *,
+    enabled: bool = True,
+    config_snapshot: dict | None = None,
+) -> None:
+    """Upsert the campaigns row for `name` and commit.
+
+    sources.campaign and clips.campaign carry a ForeignKey to campaigns.name,
+    but campaigns defined as YAML files never get a DB row automatically —
+    on Postgres (which enforces FKs, unlike default SQLite) every source/clip
+    insert then fails with a ForeignKeyViolation. Call this before inserting
+    rows that reference the campaign.
+    """
+    from core.models import Campaign
+
+    row = session.query(Campaign).filter_by(name=name).first()
+    if row is None:
+        session.add(
+            Campaign(name=name, enabled=enabled, config_snapshot=config_snapshot)
+        )
+    else:
+        row.enabled = enabled
+        if config_snapshot is not None:
+            row.config_snapshot = config_snapshot
+    session.commit()

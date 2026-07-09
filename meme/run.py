@@ -37,7 +37,7 @@ def run_meme_campaign(
 ) -> None:
     """Execute the meme generation pipeline for one campaign."""
     from core.config import load_campaign
-    from core.db import get_session
+    from core.db import ensure_campaign, get_session
 
     campaign_path = Path("campaigns") / f"{campaign_name}.yaml"
     if not campaign_path.exists():
@@ -92,6 +92,10 @@ def run_meme_campaign(
     )
 
     with get_session() as session:
+        # clips.campaign FKs campaigns.name — seed the row for YAML campaigns
+        # (Postgres enforces the FK; default SQLite does not).
+        ensure_campaign(session, campaign_name, enabled=campaign_cfg.enabled)
+
         if text_only:
             from meme.text_posts import generate_text_posts
 

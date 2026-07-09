@@ -333,7 +333,7 @@ def run_campaign(
     """
     from core.config import load_campaign
     from core.apify import Apify
-    from core.db import get_session
+    from core.db import ensure_campaign, get_session
     from producer.dedupe import (
         get_existing_source_ids,
         get_done_source_ids,
@@ -397,6 +397,19 @@ def run_campaign(
             return
 
     with get_session() as session:
+        # Ensure the campaigns row exists — sources/clips FK campaigns.name,
+        # and YAML-defined campaigns have no DB row until seeded here.
+        try:
+            snapshot = campaign_cfg.model_dump(mode="json")
+        except Exception:  # snapshot is best-effort; the row itself is required
+            snapshot = None
+        ensure_campaign(
+            session,
+            campaign_name,
+            enabled=campaign_cfg.enabled,
+            config_snapshot=snapshot,
+        )
+
         # Stage 2: dedupe
         existing_ids = get_existing_source_ids(session, campaign_name)
         done_ids = get_done_source_ids(session, campaign_name)
