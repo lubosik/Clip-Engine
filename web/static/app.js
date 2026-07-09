@@ -56,6 +56,16 @@ function _registerSW() {
   navigator.serviceWorker.register('/sw.js').catch(() => {
     // Non-fatal — app still works without SW.
   });
+  // When a new SW takes control after a deploy, reload once so HTML/CSS/JS
+  // all come from the same cache version (prevents mixed-version layouts).
+  // On a first visit there is no prior controller — skip the reload then.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloaded) return;
+    reloaded = true;
+    window.location.reload();
+  });
 }
 
 // ── Light-stream auth SVG animation ──────────────────────────────────────────
