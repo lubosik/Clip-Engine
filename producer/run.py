@@ -43,6 +43,10 @@ from core.logging import configure_logging
 configure_logging()
 log = logging.getLogger(__name__)
 
+# Demo runs stop after this many clips (spec §9). Production has no early stop
+# here — it is bounded by the spend guard and daily caps instead.
+DEMO_CLIP_TARGET = 3
+
 
 def _build_caption(template: str, hook: str, source_handle: str, hashtags: list[str]) -> str:
     hashtag_str = " ".join(h if h.startswith("#") else f"#{h}" for h in hashtags)
@@ -422,7 +426,13 @@ def run_campaign(
 
     cpu_count = os.cpu_count() or 2
 
+    # Demo runs target a small number of clips (spec §9: "produce 3 clips";
+    # "don't hunt for 100"). Stop processing further sources once we have enough,
+    # so a demo doesn't grind transcripts for every discovered candidate.
+    clip_target = DEMO_CLIP_TARGET if effective_mode == "demo" else None
+
     total_clips = 0
+    sources_processed = 0
     for source in to_process:
         # Each source gets its own session to isolate failures
         with get_session() as session:
@@ -436,6 +446,15 @@ def run_campaign(
                 max_modal_spend=max_modal_spend,
             )
             total_clips += len(clips)
+            sources_processed += 1
+
+        if clip_target is not None and total_clips >= clip_target:
+            log.info(
+                "Demo clip target reached; stopping source processing",
+                extra={"campaign": campaign_name, "clips": total_clips,
+                       "target": clip_target},
+            )
+            break
 
     run_end = datetime.now(tz=timezone.utc)
     elapsed = (run_end - run_start).total_seconds()
@@ -443,7 +462,7 @@ def run_campaign(
         "Campaign run complete",
         extra={
             "campaign": campaign_name,
-            "sources_processed": len(to_process),
+            "sources_processed": sources_processed,
             "clips_queued": total_clips,
             "elapsed_sec": round(elapsed, 1),
             "mode": effective_mode,

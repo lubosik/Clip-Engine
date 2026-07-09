@@ -87,7 +87,9 @@ class Apify:
             run = run.model_dump(by_alias=True)
 
         run_id = run.get("id", "unknown")
-        usage = run.get("usage", {})
+        # `run["usage"]` can be present-but-null (some actors), so a plain
+        # .get(..., {}) default won't protect us — coerce None to {} explicitly.
+        usage = run.get("usage") or {}
         cost = run.get("usageTotalUsd") or usage.get("COMPUTE_UNITS_CHARGED", None)
         log.info(
             "Apify actor run complete",

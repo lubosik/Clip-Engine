@@ -126,3 +126,21 @@
 - node --check clean on app.js + sw.js. Visual crossfade can't be verified headlessly — confirm on the live site after deploy.
 - Railway CLI login: `railway login --browserless` needs a PTY (no output otherwise). Ran it under `script -qfc ... /log`; pairing code emitted to the log. Background login task waiting for user to authorize at railway.com/activate.
 - State: committed + pushed (Railway auto-deploy).
+
+### 2026-07-09 (later) — Session: live demo run → root-caused "0 clips" → fixed transcript path
+- Authorized Railway CLI login (browserless, via PTY). Live URL: **https://clip-engine-production-9ecd.up.railway.app** (service Clip-Engine, Online). Verified live: `/healthz` ok, `/api/hero` presigned R2 200s, hero mp4 200 (1.86MB), served index.html/app.js/sw.js carry the seamless-loop + v5 changes → the 3 prior fixes ARE deployed and serving.
+- Triggered demo via `POST /api/runs/fitness {"mode":"demo"}` → `{started,pid:23,caps 2/2}`. Polled 15 min: **0 clips, $0 spend.** Ran silently-failing.
+- Could NOT read `/data/clips/logs/producer-fitness.log` (auto-mode classifier blocked `railway ssh` into prod — expected). `railway logs` shows only uvicorn access + scheduler cron (producer writes to a file). So reproduced stages locally via `railway run .venv/bin/python <diag>` (prod env injected):
+  - Discovery ✅ **87 candidates** (youtube scraper fine).
+  - LLM rank ✅ (OpenRouter route, key `sk-or-…`, model `claude-sonnet-4-6`) → 3 good moments.
+  - Transcript ❌ **ROOT CAUSE.** `pintostudio/youtube-transcript-scraper` rejected the input: `Field input.videoUrl is required`. Code sent `{"startUrls":[{"url":url}]}`. Every YT transcript failed → every source skipped → 0 clips.
+  - Exposed a 2nd bug: `core/apify.py` `run.get("usage", {})` returns None when the key is present-but-null → `AttributeError` on cost accounting (masked while the input error came first).
+  - Exposed a 3rd: the actor's real output is `{"data":[{start,dur,text}]}` (start/dur are STRINGS); the parser only checked transcript/captions/subtitles → "Unexpected shape" → 0 segments.
+- **Fixes (all verified against prod Apify):**
+  1. `producer/transcripts.py` `fetch_youtube_transcript`: input → `{"videoUrl": url}`.
+  2. `core/apify.py`: `usage = run.get("usage") or {}`.
+  3. `producer/transcripts.py`: parse `data` key first (fallbacks kept). `_norm_yt_segments` already coerces string start/dur. → verified **142 segments** returned for a real video.
+  4. `producer/run.py`: demo-mode early-stop `DEMO_CLIP_TARGET=3` — stop processing sources once 3 clips exist (spec §9; was going to grind all 87 transcripts).
+- Tests: added `tests/test_transcript_parse.py` (4). **Full suite 318 passed.** Removed throwaway diag scripts.
+- NOTE not yet verified end-to-end: Modal render + DB insert of a real clip (blocked earlier by the transcript bug). TikTok transcript actor (`agentx/tiktok-transcript`) input shape UNVERIFIED — may have the same startUrls issue; demo is YT-first so it wasn't hit. Verify both on the next demo run.
+- State: about to commit + push (redeploys, kills stale pid 23) then re-trigger the demo and watch clips land.

@@ -119,7 +119,9 @@ def _norm_ig_transcript(raw_item: dict) -> list[dict]:
 
 def fetch_youtube_transcript(url: str, apify: "Apify") -> list[dict]:
     """Fetch and normalise YouTube transcript segments."""
-    run_input: dict[str, Any] = {"startUrls": [{"url": url}]}
+    # pintostudio/youtube-transcript-scraper requires a single `videoUrl` string;
+    # it rejects the `startUrls` list shape ("Field input.videoUrl is required").
+    run_input: dict[str, Any] = {"videoUrl": url}
     try:
         items = apify.run(ACTOR_YT_TRANSCRIPT, run_input)
     except Exception as exc:
@@ -133,9 +135,18 @@ def fetch_youtube_transcript(url: str, apify: "Apify") -> list[dict]:
         log.warning("No transcript returned for YouTube video", extra={"url": url})
         return []
 
-    # The actor returns one item per video with embedded segment list
+    # The actor returns one item per video with the segment list under `data`:
+    #   {"data": [{"start": "0.52", "dur": "3.72", "text": "..."}, ...]}
+    # (start/dur are strings; _norm_yt_segments coerces them). Older/alternate
+    # shapes used transcript/captions/subtitles — keep those as fallbacks.
     raw_item = items[0]
-    segments_raw = raw_item.get("transcript") or raw_item.get("captions") or raw_item.get("subtitles") or []
+    segments_raw = (
+        raw_item.get("data")
+        or raw_item.get("transcript")
+        or raw_item.get("captions")
+        or raw_item.get("subtitles")
+        or []
+    )
     if isinstance(segments_raw, list):
         # Detect shape: might already be normalised or in {start,dur,text} form
         if segments_raw and isinstance(segments_raw[0], dict):
