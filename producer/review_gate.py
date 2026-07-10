@@ -166,42 +166,46 @@ def _vision_llm_call(
 
     content: list[dict[str, Any]] = []
 
+    # IMPORTANT: each text label must come BEFORE its image. With labels after
+    # images, the model associates a label with the FOLLOWING image — every
+    # check was judged against the wrong frame (all 14 clips false-failed).
+
     # Style reference images first
     for i, ref_bytes in enumerate(style_ref_bytes):
         if not ref_bytes:
             continue
         b64 = base64.standard_b64encode(ref_bytes).decode()
         content.append({
-            "type": "image",
-            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
-        })
-        content.append({
             "type": "text",
             "text": (
-                f"STYLE REFERENCE {i + 1}: This shows a correctly formatted clip. "
-                "Notice: white rounded rectangle containing the hook text around the "
-                "vertical MIDDLE of the frame (chest level); "
+                f"The next image is STYLE REFERENCE {i + 1}: a correctly formatted "
+                "clip. Notice: white rounded rectangle containing the hook text "
+                "around the vertical MIDDLE of the frame (chest level); "
                 "single large bold word (karaoke-style caption) just below it; "
                 "real human speaker roughly centered."
             ),
         })
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+        })
 
     # Extracted clip frames
     frame_labels = [
-        f"CLIP FRAME 1 — in-hook (~3s into clip, duration {clip_duration:.1f}s)",
-        "CLIP FRAME 2 — mid-clip (~50% duration, hook should be GONE by now)",
-        "CLIP FRAME 3 — near-end (~1s before outro)",
-        "CLIP FRAME 4 — outro/final frame",
+        f"The next image is CLIP FRAME 1 — in-hook (~3s into clip, duration {clip_duration:.1f}s)",
+        "The next image is CLIP FRAME 2 — mid-clip (~50% duration, hook should be GONE by now)",
+        "The next image is CLIP FRAME 3 — near-end (~1s before outro)",
+        "The next image is CLIP FRAME 4 — outro/final frame",
     ]
     for i, (fb, label) in enumerate(zip(frames, frame_labels)):
         if not fb:
             continue
         b64 = base64.standard_b64encode(fb).decode()
+        content.append({"type": "text", "text": label})
         content.append({
             "type": "image",
             "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
         })
-        content.append({"type": "text", "text": label})
 
     content.append({
         "type": "text",
