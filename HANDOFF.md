@@ -331,3 +331,12 @@ Tests: 393/393 passed (unchanged from review-gate stream's baseline). AST parse 
 
 **State:** NOT committed (per constraint). All changes in working tree. Orchestrator owns commit/push.
 Files changed: `render/modal_app.py`, `render/reframe.py` (new), `assets/models/face_detection_yunet.onnx` (new, binary), `tests/test_config.py` (updated for new fitness.yaml values).
+
+### 2026-07-10 — Precision pass CLOSED: gate live and correct, 8 READY clips
+- Purge executed (12 old clips: PG rows + R2 objects). Migration 003 applied on deploy. Fresh gated demo run: 14 renders (podcast-only sources — Huberman + Diary of a CEO; zero cartoons).
+- **Gate bug #1:** vision prompt said hook lives in "upper 40%" — contradicted the mid-frame layout contract; all 14 false-failed. Fixed prompt (mid-frame, lenient centering).
+- **Gate bug #2 (the real killer):** frame LABELS were placed AFTER images in the vision message → model associated each label with the FOLLOWING image → every check judged the wrong frame. Fixed: labels BEFORE images. Verified with the gate's own extracted frames: all 7 checks correct. LESSON: in multi-image vision prompts, text labels must precede their image.
+- `scripts/regate.py` re-judged all 14 in place (no re-render spend). **Result: 8 READY (formula 0.686–0.819), 6 didnt_pass.** Spot-checked failures by frame: clip 18 speaker genuinely off-center (reframe miss — mouth-heuristic weakness on that source), clip 23 hook genuinely missing. THE GATE'S CALLS ARE CORRECT.
+- Verified render layout matches style refs exactly (hook white box mid-frame w/ black text, CapCut captions below, VICI PEPTIDES logo bottom readable, via @handle credit, real CTA outro, real humans, centered).
+- Spend: $0.504 / $30 MTD total (incl. all 26 renders to date).
+- OPEN: (1) reframe misses on some two-shot sources → TalkNet-ASD upgrade path documented in render/reframe.py; (2) clip 23 missing hook overlay — investigate hook drawtext edge case; (3) GitHub push blocked (PAT revoked; ~5 commits local-only, deployed via railway up); (4) POSTIZ_API_URL still missing in Railway (posting step); (5) meme demo; (6) rotate chat-pasted creds.
