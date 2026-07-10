@@ -179,8 +179,9 @@ def _vision_llm_call(
             "type": "text",
             "text": (
                 f"STYLE REFERENCE {i + 1}: This shows a correctly formatted clip. "
-                "Notice: white rounded rectangle containing the hook text in the upper frame; "
-                "single large bold word (karaoke-style caption) in the mid-frame area; "
+                "Notice: white rounded rectangle containing the hook text around the "
+                "vertical MIDDLE of the frame (chest level); "
+                "single large bold word (karaoke-style caption) just below it; "
                 "real human speaker roughly centered."
             ),
         })
@@ -217,17 +218,20 @@ def _vision_llm_call(
             '  "animation_detected": true/false\n'
             "}\n\n"
             "Rules:\n"
-            "- hook_present_in_hook_frame: Frame 1 shows a white/light rounded box "
-            "with text overlaid in the upper 40% of the frame.\n"
+            "- hook_present_in_hook_frame: Frame 1 shows a white/light box with bold "
+            "text overlaid, positioned around the vertical MIDDLE of the frame "
+            "(roughly 35-70% of frame height — chest level, like the style refs).\n"
             "- hook_absent_in_mid_frame: Frame 2 does NOT have that white hook box "
             "(hook must disappear by ~8s).\n"
             "- captions_present: Any frame shows single-word or short-phrase captions "
-            "in the lower-mid area (bold white text, not the hook).\n"
-            "- watermark_visible: A subtle logo or watermark is visible anywhere.\n"
+            "(bold white text with dark outline, not the hook box text).\n"
+            "- watermark_visible: A logo or watermark is visible (typically near the "
+            "bottom of the frame).\n"
             "- real_humans: Footage shows real people on camera, not animation, "
             "cartoon, CGI, or illustrated content.\n"
-            "- speaker_centered: The main speaker's head/body is roughly in the "
-            "horizontal center of the frame.\n"
+            "- speaker_centered: The main speaker's head/body sits within the middle "
+            "half of the frame horizontally (lenient — reject only clear off-frame "
+            "drift where the speaker is cut off or hugging an edge).\n"
             "- animation_detected: Set to true ONLY if footage looks animated, "
             "cartoon, or computer-generated. This is an AUTO-FAIL."
         ),
