@@ -340,3 +340,133 @@ Files changed: `render/modal_app.py`, `render/reframe.py` (new), `assets/models/
 - Verified render layout matches style refs exactly (hook white box mid-frame w/ black text, CapCut captions below, VICI PEPTIDES logo bottom readable, via @handle credit, real CTA outro, real humans, centered).
 - Spend: $0.504 / $30 MTD total (incl. all 26 renders to date).
 - OPEN: (1) reframe misses on some two-shot sources → TalkNet-ASD upgrade path documented in render/reframe.py; (2) clip 23 missing hook overlay — investigate hook drawtext edge case; (3) GitHub push blocked (PAT revoked; ~5 commits local-only, deployed via railway up); (4) POSTIZ_API_URL still missing in Railway (posting step); (5) meme demo; (6) rotate chat-pasted creds.
+
+### 2026-07-10 (later) — Sentence-boundary snapping for clip start/end times
+
+**Problem:** Clips started and ended mid-sentence because the LLM returned raw float timestamps that landed inside a word/sentence, and nothing in the pipeline corrected them before the ffmpeg cut.
+
+**Implementation (no regressions — 462/462 tests pass, +54 new):**
+
+1. **`core/sentences.py`** (new module):
+   - `build_sentence_spans(transcript)` — converts segment-level transcript to sentence-level spans with timestamps. Concatenates all segment texts with space separators; assigns each character a timestamp via linear interpolation within its segment (`char j → seg_start + j/(n-1) * duration`). Splits the concatenated text into sentences on `[.!?]\s+(?=[A-Z])` boundaries with a protected-dot set (ellipsis `...`, known abbreviations, single-letter initials). Sentences that span segment boundaries automatically get the right start/end time because char→time is a flat map of the full text. Returns `[{"text", "start", "end"}]`.
+   - `snap_to_sentences(moment_start, moment_end, sentence_spans, clip_len)` — snaps start DOWN to the sentence containing `moment_start` (never forward, so opening words are not clipped), snaps end to the END of the sentence containing `moment_end` (never backwards, so the final thought is never cut off). Enforces `clip_len [min, max]` by dropping/adding whole trailing sentences. Safe no-op when `sentence_spans` is empty.
+
+2. **`core/llm.py`** (modified):
+   - Added `from core.sentences import build_sentence_spans, snap_to_sentences`.
+   - Updated `_build_prompt`: prompt now explicitly instructs "Choose start at the FIRST word of a sentence and end at the LAST word of a sentence — the clip must be a complete, coherent thought..." and notes the hook must describe the opening sentence.
+   - Wired snapping into `rank_moments` after `_validate_moments`: builds sentence spans from the transcript, snaps every validated moment's start/end, returns snapped moments. Failure is non-fatal (logs warning, returns raw timestamps).
+
+3. **`tests/test_sentences.py`** (new, 54 tests):
+   - `TestSentenceCharSpans` (14): boundary detection, abbreviation guard, ellipsis, span coverage/contiguity.
+   - `TestBuildSentenceSpans` (19): empty input, fixture sentence count (5 sentences from 3 segments), timestamps at segment boundaries, ellipsis not split, monotonicity, bounds.
+   - `TestSnapToSentences` (19): operator scenario (start=8.0→0.0, end=25.0→sentence-end, NOT 25.0), clip_len max trim, clip_len min extend, edge cases.
+   - `TestLlmIntegration` (2): import smoke + prompt instruction content.
+
+**Verified with the real operator fixture segments (3 segs, note mid-sentence endings):**
+- `snap(8.0, 25.0, spans, (5, 60))` → start=0.0, end=≈29.44 (sentence 4 end). NOT 8.0 / NOT 25.0. ✓
+- `snap(8.0, 25.0, spans, (5, 15))` → trimmed to ≤15s, still on a sentence boundary. ✓
+- `snap(0.0, 5.0, spans, (20, 45))` → extended to ≥20s, still on a sentence boundary. ✓
+- "tissue repair after..." is ONE sentence (ellipsis is fully protected, no split). ✓
+
+**AST parse:** `python -c "import ast; ast.parse(open('core/sentences.py').read())"` and `core/llm.py` both clean.
+
+### 2026-07-10 (later) — Style-ref study session (no code changes)
+- Lubosi added 4 new stills (IMG_7495–7498) + screen recording `ScreenRecording_07-10-2026 17-15-44_1.MP4` to `/root/clip-engine/style_refs/` (note: style_refs lives OUTSIDE the repo, at /root/clip-engine/). Whole folder is now the canonical visual reference set. Studied all refs + extracted recording frames + pulled frames from live clip 26 for comparison.
+- Reference rules extracted (see chat report): hook = centered per-line rounded white pill, sentence case, quotes+emoji, visible ~3s (not 8s); captions = ONE word, ALL CAPS, white+black outline, NO cyan highlight, fixed at ~65% height; watermark = transparent (no background box), must POP (user wants high-contrast, not blend-in) at ~80% height; camera cuts must land with speaker already fully centered (no half-faces / no visible reframe drift).
+- Conflicts vs hardwired template flagged for reconcile: hook duration (8s vs ~3s), hook box style (left-aligned square drawtext box vs centered rounded pills), hook truncation "..." at 4×22 chars (user: hooks must fit, not truncate), caption style (3-word cyan-highlight chunks vs single-word all-caps white), watermark asset (logo.png has baked solid background — must be replaced with transparent version + contrast treatment), watermark y (~91% vs ~80%).
+- DASHBOARD BUG DIAGNOSED (not fixed yet): queue is permanently blank after Precision-pass deploy. `web/static/queue.js` `_load()` early-returns when `#queue-cards` is missing (queue.js:146–147), but `#queue-cards` is only created by `_renderCards()` (queue.js:314) which is only called from `_load()` → deadlock on fresh page load. Introduced in commit 1eae04d. Server data intact: /api/clips returns 14 clips (13 pending_review = 7 ready + 6 didnt_pass, 1 scheduled); R2 media presigns and streams fine. Fix = render skeleton into `#queue-ready-section` (always exists) or drop the early return.
+- Clips NOT purged yet (user wants reconcile talk first; purge for next demo campaign is pre-approved — use scripts/purge_clips).
+
+### 2026-07-10 (later 2) — Peptides production campaign wired + coherence/watermark/hook fixes SHIPPED
+Deployed to Railway (railway up) + Modal (make deploy-modal). All 462 tests green.
+
+**Frontend blank-queue bug — FIXED & DEPLOYED.** `web/static/queue.js` `_load()` no longer early-returns on missing `#queue-cards`; skeleton/error now render into the always-present `#queue-ready-section` (also fixed the dead `cardsEl` ref in the catch block). Verified the deployed /queue.js carries the fix. This was why the 13 clips looked "disappeared" — server data was always intact.
+
+**13 fitness demo clips PURGED.** scripts/purge_clips.py fitness --yes (via Postgres DATABASE_PUBLIC_URL proxy — the internal host is unreachable off-Railway). API now returns 0 clips. Sources/transcripts/render_jobs kept.
+
+**Sentence coherence (the big one) — SHIPPED.** New `core/sentences.py`: `build_sentence_spans()` (flat char→time interpolation across segments, splits on [.!?] with abbreviation/ellipsis guards, merges cross-segment sentences) + `snap_to_sentences()` (start snaps DOWN to sentence start, end snaps to sentence end, then enforces clip_len by adding/dropping WHOLE sentences). Wired into `core/llm.py rank_moments` after `_validate_moments` (non-fatal fallback to raw ts on error) + added a mandatory SENTENCE-BOUNDARY RULE to the ranking prompt tying the hook to the opening sentence. 54 new tests incl. operator's 3 real transcripts. Verified: LLM (8.0,25.0)→(0.0,29.44), never mid-sentence.
+
+**Hook truncation — FIXED & DEPLOYED (Modal).** `render/modal_app.py`: replaced the 4-line cap + "..." append with `_compute_hook_fit()` — shrink-to-fit font (44→30px floor), up to 6 lines, height ≤34% frame, NEVER truncates. Fixes the "hook didn't finish / dot-dot-dot" complaint. Needs make deploy-modal (done).
+
+**Watermark background removed — DONE.** `assets/peptides/logo.png` generated from the fitness VICI logo: cream bg keyed out → transparent, letters recolored WHITE + soft dark shadow so it pops on any footage with no box. Verified over dark/light/mid backgrounds. (Brand is VICI PEPTIDES so it fits the new campaign natively.)
+
+**Clip-target override — added.** `producer/run.py --clip-target N` (+ threaded through run_campaign and demo render-cap headroom) and `POST /api/runs/{campaign}` accepts `clip_target`. Lets a demo stop at exactly N ready clips without touching DEMO_CLIP_TARGET.
+
+**NEW PRODUCTION CAMPAIGN: campaigns/peptides.yaml** (mode: production, config-driven, nothing hardwired). Niche = peptides + looksmaxxing/blackpill. 12 podcast-targeted YT search terms (correct spellings: Retatrutide, BPC-157, TB-500, CJC-1295, Ipamorelin, MOTS-c, GHK-Cu, etc.), ranking_rules encode: coherence-mandatory, strong 2s open, hook==opening point, pro-peptide + experiences + looksmaxxing/Clavicular, exclude sourcing/self-harm/guaranteed-cure/hateful. Assets: assets/peptides/{logo.png transparent, Montserrat-ExtraBold.ttf, outro.mov}. postiz_channels [instagram-standalone, x], autopost false. Assets auto-upload to R2 per-campaign at render dispatch.
+
+**DEMO RUN IN FLIGHT:** POST /api/runs/peptides {mode:demo, clip_target:5, caps $3/$3}. Watching for 5 ready clips, then frame-review vs style_refs.
+
+**OPEN / WATCH:**
+- Speaker-centering on 2-person wide shots still uses the mouth-variance heuristic (reframe.py) — may miss like fitness clip 18; TalkNet-ASD upgrade path still documented. Check the peptides clips' framing on cuts; if a two-shot miss appears, that's the known weakness, not a regression.
+- Clavicular's own content is NOT on YouTube (banned Apr 2026) — only 3rd-party interviews/clips about him will surface. Peptide-doctor/biohacking podcasts are the reliable YT source.
+- GitHub push still blocked (PAT revoked) — everything deployed via railway up / make deploy-modal, commits local-only.
+- Rotate chat-pasted creds still outstanding.
+
+### 2026-07-10 (later 3) — Peptides demo POST-MORTEM: 3 blockers found (clips NOT acceptable)
+Demo run produced ~9+ clips, ALL gate-failed → 0 ready. Frame review + Modal logs give exact root causes:
+
+1) **FACE DETECTION DEAD IN MODAL (critical, root cause of centering failure).** Every reframe logs "reframe: no faces detected anywhere; falling back to center crop" — YuNet finds ZERO faces on all footage (even clean frontal Joe Rogan). Center-crop then leaves off-center guests half-out-of-frame → Phase-1 gate `speaker_centered` fails almost everything. This is the user's #1 requirement. Scene detection works (13 scenes), so it's YuNet specifically. HANDOFF's "20/20 centered" verification ran LOCALLY (model at assets/models/) — it never exercised the Modal container, where the model path likely doesn't resolve. `_get_yunet_detector` returns None if no model file found at YUNET_MODEL_SEARCH_PATHS ([repo]/assets/models/face_detection_yunet.onnx via __file__.parent.parent, and /models/...). In Modal (add_local_python_source("render") + COPY . /), reframe.py's parent.parent likely isn't repo root, so the model isn't found → None → 0 faces. FIX HYPOTHESIS: ship YuNet model to a stable Modal path and/or add /assets/models + an env override to the search paths; add a log line distinguishing "model not found" vs "0 faces". MUST verify inside Modal, not locally.
+
+2) **WATERMARK renders the OLD fitness cream-box logo, not the transparent one.** Modal log confirms it downloaded the CORRECT key (campaigns/peptides/assets/logo.png = my white transparent wordmark, md5 verified in R2). Yet rendered pixels show the fitness cream box w/ dark text (the "red stars" were the guest's red shirt through the semi-transparent box). Since the right file was downloaded, suspect warm-container reuse of a stale watermark.png OR an overlay step that flattens onto a bg. NEEDS Modal-side repro (render one clip, inspect the downloaded watermark.png bytes + the overlay filter output).
+
+3) **CONTENT off-topic.** Discovery→ranking pulled "Joe Rogan - Anybody Can Get Ripped!" (@JRE Clips) — body types/fighting/endomorphs, NOT peptides. sort_by_engagement floats high-view general clips; the ranker clipped fitness moments despite peptide ranking_rules. FIX: bias discovery toward genuinely peptide/looksmax-dense sources (channel allowlist of the researched peptide podcasts, and/or a topical pre-filter on title/transcript) + make the ranker REJECT (score 0) moments not about peptides/looksmaxxing.
+
+WHAT WORKS (verified in frames): hook shrink-to-fit (full, no "..."), sentence coherence (hooks are complete sentences, clean starts), CapCut captions + cyan highlight, the transparent watermark asset itself (just not reaching the render), outro pipeline, gate correctly rejecting bad clips.
+
+Run self-stops via demo render-cap + $3 modal cap (spend trivial, ~$0.30). Next: fix #1 first (centering is the hard requirement), then #2, then #3; re-run demo.
+
+### 2026-07-10 (later 4) — 3 render blockers FIXED + deployed + re-run
+Root causes nailed and fixed in order:
+
+1) **Face detection (centering) — FIXED & VERIFIED IN MODAL.** Root cause: the Modal image only baked render/*.py via add_local_python_source; the YuNet ONNX model (assets/models/face_detection_yunet.onnx) was NEVER shipped, so _get_yunet_detector returned None → 0 faces → center-crop everything → speaker_centered gate failed all. Fix: modal_app.py image now `.add_local_file("assets/models/face_detection_yunet.onnx","/models/face_detection_yunet.onnx",copy=True)` (/models is a YUNET_MODEL_SEARCH_PATHS entry). Also reframe.py now logs "YuNet model NOT FOUND" vs "model loaded but 0 faces" so this can never be silent again. VERIFIED with a throwaway `modal run` on the deployed image: model_present=True, faces_detected=1 on a real face frame — IN THE CONTAINER, not locally (the prior verification's blind spot).
+
+2) **Watermark — was the early-render asset race; hardened.** The newest clip (41) already rendered the CORRECT transparent white VICI PEPTIDES wordmark (no box) — overlay + asset are fine. Only the first ~3 clips showed the old cream box. Root cause: render_dispatch.ensure_campaign_assets_on_r2 used `if not r2.exists(key): upload` — a stale asset already in R2 won over the freshly deployed one on the first renders. Fix: always (re)upload the deployed asset once per process (per-process cache still dedupes) so the deployed file is authoritative.
+
+3) **Content targeting — topical gate added.** First run's first source was "Joe Rogan – Anybody Can Get Ripped" (body types/fighting), but LATER sources were on-topic (Clavicular, DIY injectables, looksmaxxing/incel) — so search terms are fine; the ranker just over-stretched a fitness clip. Fix: peptides.yaml ranking_rules now opens with a HARD TOPICAL GATE — return [] if the source isn't substantively about peptides/hormones/TRT or looksmaxxing/aesthetics; don't stretch generic fitness. (Phase-2 gate uses the same rules, double-enforcing.)
+
+Also: **SW cache-bust v7→v8** — the operator's "empty dashboard" was the PWA service worker serving the OLD broken queue.js; a fresh browser (Playwright) rendered the queue fine (Ready empty because all failed the gate; "Didn't pass review" section full). v8 forces the refresh.
+
+Deployed: make deploy-modal (model bake + reframe log) + railway up (peptides.yaml, sw.js, render_dispatch.py). 462 tests green. Purged 12 failed peptides clips. Re-run triggered: demo, clip_target 5, caps $3/$3. WORKS-IN-PROGRESS: verify centering end-to-end on the re-run's Modal logs (expect "reframe: applying N per-scene crop(s)") + gate speaker_centered passing; then frame-review the 5 clips vs style_refs.
+
+### 2026-07-10 (later 5) — Re-run RESULTS: fixes verified working; gate-vs-niche tension surfaced
+Re-run (pid 24) produced 2 peptides clips from "The Diary Of A CEO". FRAME-VERIFIED the 3 fixes all WORK:
+- CENTERING: speaker properly framed across all sampled frames (clip 42 @2/8/16/22s, clip 43 @3/20/40/55s). Modal log confirms "reframe: applying N per-scene crop(s)" (face detection alive). Model verified in-container (faces_detected=1).
+- WATERMARK: clean transparent white VICI PEPTIDES, no box, pops on all backgrounds.
+- HOOK: full, coherent, on-topic, strong ("The FDA banned effective peptides overnight in 2023 — RFK called it illegal"; "A patient increased his sperm count 10x — a peptide helped him lose 100 lbs"). No "...".
+- CONTENT: on-topic; topical gate working ("No clips selected from source" on off-topic sources).
+- DASHBOARD: renders fine (Playwright screenshot shows READY card w/ thumb+hook+watermark+score). The operator's "empty dashboard" was PWA SW cache (fixed v8).
+
+NEW ISSUES / DECISIONS FOR OPERATOR:
+1) **Safety gate vs the niche (KEY DECISION).** review_gate Phase-2 has a `safety_medical_claims` AUTO-FAIL. Peptide content is inherently health-claims-heavy, so it rejects exactly the clips this campaign wants (clip 42 auto-failed on "sperm count 10x / lose 100 lbs"). Both "ready" clips are actually gate-FAILURES shown via manual Override (gate_status='overridden'; producer never sets that — only POST /api/clips/{id}/override-gate does). Options: make the medical-claims auto-fail campaign-configurable / relax it for peptides (keep truly-dangerous-advice blocks), or keep strict and accept low yield. NEEDS operator call.
+2) **clean_ending weak** on both (0.25/0.40) — the sentence END-snap may be ending a beat early/late; worth tuning snap_to_sentences end selection.
+3) **Diary of a CEO baked-in "Notes" graphics** (yellow/white fact-cards + black "Notes" tab) collide with our captions/watermark on parts of clips. Source-specific. Options: gate check to reject frames with competing baked-in text, or exclude DOAC-style sources.
+Spend: peptides $0.27, total $0.82/$30 MTD. Fitness still enabled (daily --all cron will recreate fitness clips) — recommend disabling fitness (needs a railway up; hold until no run in flight).
+
+### 2026-07-11 — Session: Sources view + topic-boundary segmentation (Fable 5 + 1 fork agent)
+Two features from the operator brief. All work done; deploying via `railway up` (Railway-only — no Modal/render changes). GitHub push still blocked (PAT revoked); local commit made. **Full suite 499 passed** (462 baseline + 21 sources + 16 topics).
+
+**PART 1 — "Sources" view (track every mined video). Fork agent built it.**
+- Backend: `GET /api/sources` in `web/api.py` (`_source_thumbnail_url()` helper + endpoint). Lists Source rows that have been USED (status != 'pending' OR has clips), newest-first by COALESCE(processed_at, updated_at). Per source: id, source_id, platform, url, title, author_handle, campaign, status, processed_at, clip_count, clips[{id,hook,status,gate_status}], used_ranges_count, thumbnail_url. Supports `?campaign=` + `?q=` (ILIKE) filters. `selectinload(Source.clips)` avoids N+1.
+- Thumbnails: youtube → `https://i.ytimg.com/vi/{id}/hqdefault.jpg` (permanent, no expiry). tiktok → `videoMeta.coverUrl` from Apify metadata (CDN-signed, expires in hours/days → frontend `onerror` falls back to platform icon). Metadata inspection confirmed those keys on real prod rows.
+- Frontend: new `web/static/sources.js` (`initSources`), Sources tab in `index.html` (`#view-sources` + tab button), wired into `app.js` VIEWS/`_initView`/titles/logout resets, `api.getSources()`, 3 mock sources in `fixtures.js`, cinematic-glass card styles in `styles.css` (thumbnail + title + @handle + platform badge + campaign chip + processed date + clickable URL + status chip + "N clips" + expandable clip list with gate_status chips + client-side search + empty state). `sw.js` v8→v9, `/sources.js` precached.
+- Tests: `tests/test_sources_api.py` (21): list shape, newest-first, pending-unused excluded, clip_count, campaign filter, q search, auth-required. Doubles as the dedupe audit (operator can confirm nothing is re-clipped).
+
+**PART 2 — Cut clips on TOPIC boundaries, not arbitrary time.**
+- `core/topics.py` (NEW):
+  - `segment_transcript(transcript, clip_len)` — one LLM call splitting the transcript into self-contained topic segments `[{start,end,summary,ends_because}]`. **Best-effort: returns [] on ANY error** (missing SDK/keys, transport, unparseable) so the producer run never breaks.
+  - `snap_end_off_next_topic(start,end,topics,spans,clip_len)` — PURE deterministic guard: if the (already sentence-snapped) end has bled into a topic that begins AFTER the topic the clip started in, trims end back to the resolving edge of an earlier topic (most-conservative single-topic boundary first, snapped to a real sentence end); over-trim guard leaves the clip unchanged if trimming would break clip_len min.
+  - `FEWSHOT_BOUNDARY_EXAMPLES` — 3 worked examples from REAL VPS transcripts (2 positive + 1 negative), incl. the exact peptide-start failure case. Embedded into the ranker prompt.
+- `core/llm.py`: `rank_moments` now runs the segmentation pass BEFORE selection, feeds the topic segments + few-shot + a mandatory TOPIC-BOUNDARY RULE into `_build_prompt`, and applies `snap_end_off_next_topic` right after the existing sentence-snap. `_build_prompt` gained optional `topic_segments` param (existing sentence-boundary test strings preserved).
+- `producer/review_gate.py`: Phase-2 content gate gained a **self-contained boundary check**. `_content_llm_call` takes look-ahead context (`_build_lookahead_slice`: text spoken in [end, end+15s]) and the JSON verdict gained `self_contained {complete_thought, ends_on_new_topic, reason}`. `_score_content_verdict` scores it (absent → PASS, so existing mocked-verdict tests unaffected); `_run_phase2` treats a self_contained failure as a hard `didnt_pass` (→ re-cut), same as a safety fail. A clip that ends on the first sentence of a new topic now fails the gate.
+- Tests: `tests/test_topics.py` (16): validation, topic-index lookup, the operator's exact case (wrong end 1398.0 → snapped 1370.4), no-op cases, over-trim guard, sentence-edge snapping, few-shot content, graceful-degradation on LLM failure.
+
+**VERIFIED on the REAL problem transcript (youtube:jt5hHb6kzYM, "Peptide Expert: What Do Peptides Actually Do? - Dr Alex Tatem"):**
+- The patient sperm-count/GLP-1 story resolves at **1370.4 ("Started with a peptide.")**. The very next lines are the host's NEW question + the "peptides are almost like an app on your phone" answer — a DIFFERENT topic.
+- WRONG cut (1343.9 → 1398.0, ending inside "...app on your phone. So imagine before we had apps.") → **snap → (1343.9 → 1370.4)**, trimming 27.6s off the new topic. The peptide-overview topic becomes its own separate candidate clip. Exactly the operator's requested correction.
+- (Snap demonstrated LLM-free using the real transcript's own sentence spans + the topic boundaries read from the transcript, because the live segmentation call is currently blocked — see below.)
+
+**⚠️ BLOCKER FOR THE OPERATOR — OpenRouter credits depleted.** A live `railway run` of `segment_transcript` returned HTTP 402: "requires more credits… you requested up to 4096 tokens, but can only afford 1016." This affects ALL LLM calls (ranking, gate, segmentation), not just this feature — no live producer run can rank/gate until credits are topped up at https://openrouter.ai/settings/credits. The new code degrades gracefully (segmentation → [] → snap no-op → falls back to sentence-snapping), so nothing crashes, but topic segmentation + the content gate won't actually run until credits are restored. Re-run the peptides demo after topping up to confirm the boundary correction end-to-end on a fresh render.
+
+**NOTE / cost:** the segmentation pass adds one LLM call per source (roughly doubles ranking token cost per source). Kept because the operator explicitly asked for a segmentation pass; the deterministic snap guard still corrects boundaries even when the LLM slips.
+
+**OPEN (unchanged + new):** OpenRouter credit top-up (NEW blocker); safety-gate-vs-niche decision (medical_claims auto-fail rejects peptide clips — still needs operator call); POSTIZ_API_URL missing in Railway; rotate chat-pasted creds; GitHub push blocked (PAT revoked).

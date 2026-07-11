@@ -278,7 +278,21 @@ def reframe_segment(
             scene_crops.append((scene_start, scene_end, cx_px))
 
         if not any_face_found:
-            log.info("reframe: no faces detected anywhere; falling back to center crop")
+            # Distinguish "the detector never loaded" (a deploy/path bug) from
+            # "the model ran but genuinely found no faces" so this failure mode
+            # is never silent again.
+            if _yunet_model_path is None:
+                log.warning(
+                    "reframe: YuNet model NOT FOUND at any of %s — face detection "
+                    "disabled, falling back to center crop. Ship the ONNX model "
+                    "into the container or set REFRAME_YUNET_MODEL_PATH.",
+                    [str(p) for p in YUNET_MODEL_SEARCH_PATHS],
+                )
+            else:
+                log.info(
+                    "reframe: model loaded (%s) but no faces detected anywhere; "
+                    "falling back to center crop", _yunet_model_path,
+                )
             _center_crop_and_audio(raw_seg, out_video, out_audio, out_w, out_h, log)
             return
 

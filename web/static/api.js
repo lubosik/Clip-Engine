@@ -155,4 +155,11 @@ export const api = {
   triggerRun(campaign) {
     return request('POST', `/api/runs/${encodeURIComponent(campaign)}`);
   },
+
+  // Sources view
+  getSources(params = {}) {
+    const entries = Object.entries(params).filter(([, v]) => v != null && v !== '');
+    const qs = entries.length ? '?' + new URLSearchParams(entries).toString() : '';
+    return request('GET', '/api/sources' + qs);
+  },
 };

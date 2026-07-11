@@ -256,6 +256,7 @@ def _content_llm_call(
     hook: str,
     transcript_text: str,
     ranking_rules: str,
+    next_context: str = "",
 ) -> dict[str, Any]:
     """Score the clip content on the §6c 10-question rubric + §7 safety list.
 
@@ -289,16 +290,34 @@ def _content_llm_call(
         else anthropic.Anthropic(api_key=api_key)
     )
 
+    next_section = (
+        f"""
+
+WHAT IS SAID IMMEDIATELY AFTER THE CLIP ENDS (for boundary judgement only — this \
+text is NOT part of the clip):
+{next_context}"""
+        if next_context
+        else ""
+    )
+
     prompt = f"""You are a viral short-form content quality analyst.
 
 CLIP HOOK:
 {hook or '(no hook)'}
 
-TRANSCRIPT EXCERPT:
+TRANSCRIPT EXCERPT (this is the full spoken content of the clip):
 {transcript_text or '(no transcript)'}
 
 CAMPAIGN RANKING RULES:
-{ranking_rules or 'Default: prefer useful, interesting, standalone moments.'}
+{ranking_rules or 'Default: prefer useful, interesting, standalone moments.'}{next_section}
+
+SELF-CONTAINED BOUNDARY CHECK (critical): A good clip is ONE complete idea. It \
+must start on a complete thought and END where that thought RESOLVES — it must NOT \
+cut off mid-point, and it must NOT bleed into the first sentence of a NEW topic \
+(e.g. a new question from the host, or the speaker starting a different subject). \
+Compare the END of the clip's transcript with what is said immediately after: if \
+the clip ends right as a new subject has only just been introduced, it FAILS the \
+boundary check and must be re-cut so it ends where the prior thought completed.
 
 Score each criterion from 0.0 (completely fails) to 1.0 (excellent):
 1. hook_quality: Does the opening create immediate curiosity or tension?
@@ -337,6 +356,11 @@ Return ONLY this JSON (no prose, no code fences, no markdown):
     "medical_claims": false,
     "harmful_content": false,
     "guideline_violation": false
+  }},
+  "self_contained": {{
+    "complete_thought": true,
+    "ends_on_new_topic": false,
+    "reason": "<one line: does the clip start and end on a complete thought, or does it cut off mid-point / bleed into a new topic?>"
   }}
 }}"""
 
@@ -593,6 +617,33 @@ def _score_content_verdict(
                 f"SAFETY AUTO-FAIL: {key.replace('_', ' ')}"
                 if triggered
                 else f"Safety OK: {key}"
+            ),
+        })
+
+    # ── Self-contained boundary check ────────────────────────────────────
+    # Absent field defaults to PASS so callers/tests that don't provide it are
+    # unaffected; only an explicit boundary problem fails the clip (→ re-cut).
+    sc_raw = verdict.get("self_contained")
+    if isinstance(sc_raw, dict):
+        complete_thought = bool(sc_raw.get("complete_thought", True))
+        ends_on_new_topic = bool(sc_raw.get("ends_on_new_topic", False))
+        sc_pass = complete_thought and not ends_on_new_topic
+        sc_reason = str(sc_raw.get("reason") or "").strip()
+        reasons.append({
+            "phase": "2",
+            "check": "self_contained",
+            "pass": sc_pass,
+            "reason": (
+                (sc_reason or "clip is a complete, self-contained thought")
+                if sc_pass
+                else (
+                    "SELF-CONTAINED FAIL: "
+                    + (sc_reason or (
+                        "clip ends on the first sentence of a new topic"
+                        if ends_on_new_topic
+                        else "clip cuts off mid-thought"
+                    ))
+                )
             ),
         })
 
@@ -887,8 +938,11 @@ def _run_phase2(
 
     # Build transcript text slice for this clip's time range
     transcript_text = _build_transcript_slice(transcript_segments, start, end)
+    # Look-ahead: what is said right after the clip ends, so the boundary check
+    # can tell whether the clip bleeds into the first sentence of a new topic.
+    next_context = _build_lookahead_slice(transcript_segments, end)
 
-    verdict = _content_llm_call(hook, transcript_text, ranking_rules)
+    verdict = _content_llm_call(hook, transcript_text, ranking_rules, next_context)
     formula_score, content_reasons = _score_content_verdict(verdict)
 
     all_reasons = list(phase1_reasons) + content_reasons
@@ -898,8 +952,16 @@ def _run_phase2(
         not r["pass"] and r["check"].startswith("safety_")
         for r in content_reasons
     )
+    boundary_fail = any(
+        not r["pass"] and r["check"] == "self_contained"
+        for r in content_reasons
+    )
     score_fail = formula_score < FORMULA_SCORE_THRESHOLD
-    gate_status = "ready" if (not safety_fail and not score_fail) else "didnt_pass"
+    gate_status = (
+        "ready"
+        if (not safety_fail and not score_fail and not boundary_fail)
+        else "didnt_pass"
+    )
 
     return gate_status, formula_score, all_reasons
 
@@ -932,3 +994,27 @@ def _build_transcript_slice(
 
     combined = " ".join(relevant)
     return combined[:4000] if combined else "(no transcript in clip range)"
+
+
+def _build_lookahead_slice(
+    segments: list[dict] | None,
+    end: float | None,
+    window: float = 15.0,
+) -> str:
+    """Return the transcript text spoken in [end, end + window] seconds.
+
+    Used by the self-contained boundary check to see whether the clip ends just
+    as a new topic begins. Returns "" when unavailable so the content call
+    simply omits the look-ahead section.
+    """
+    if not segments or end is None:
+        return ""
+    out: list[str] = []
+    for seg in segments:
+        seg_start = float(seg.get("start") or 0)
+        text = str(seg.get("text") or seg.get("word") or "").strip()
+        if not text:
+            continue
+        if end <= seg_start <= end + window:
+            out.append(text)
+    return " ".join(out)[:1500]

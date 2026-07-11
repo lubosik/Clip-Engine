@@ -143,11 +143,14 @@ export function refreshQueue() {
 // ── Internal ──────────────────────────────────────────────────────────────────
 
 async function _load() {
-  const cardsEl = document.getElementById('queue-cards');
-  if (!cardsEl) return;
-
+  // #queue-cards only exists once _renderCards() has drawn a ready grid, so on a
+  // fresh load it is absent — fall back to the always-present ready section for the
+  // skeleton instead of bailing out (which left the queue permanently blank).
   if (_clips.length === 0) {
-    cardsEl.innerHTML = _skeletonHTML();
+    const skeletonTarget =
+      document.getElementById('queue-cards') ||
+      document.getElementById('queue-ready-section');
+    if (skeletonTarget) skeletonTarget.innerHTML = _skeletonHTML();
   }
 
   try {
@@ -179,12 +182,17 @@ async function _load() {
     if (err.status === 401) { _ctx.onUnauthorized(); return; }
     _ctx.toast('Failed to load clips: ' + err.message, 'error');
     if (_clips.length === 0) {
-      cardsEl.innerHTML = `
+      const errTarget =
+        document.getElementById('queue-cards') ||
+        document.getElementById('queue-ready-section');
+      if (errTarget) {
+        errTarget.innerHTML = `
         <div class="empty-state">
           <div class="empty-state-floor" aria-hidden="true"></div>
           <h3>Could not load clips</h3>
           <p>${_escHtml(err.message)}</p>
         </div>`;
+      }
     }
   }
 }

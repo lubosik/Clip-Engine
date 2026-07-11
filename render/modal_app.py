@@ -141,6 +141,16 @@ image = (
     # Include render/reframe.py in the container so modal_app can import it.
     # copy=True bakes the file into the image layer at deploy time.
     .add_local_python_source("render", copy=True)
+    # Ship the YuNet face-detection model. add_local_python_source only bakes
+    # the *.py of the render package — the ONNX model lives under assets/ and
+    # was NOT reaching the container, so face detection silently returned zero
+    # faces and every clip fell back to a center crop. /models/ is one of the
+    # paths reframe.py searches (YUNET_MODEL_SEARCH_PATHS).
+    .add_local_file(
+        "assets/models/face_detection_yunet.onnx",
+        "/models/face_detection_yunet.onnx",
+        copy=True,
+    )
 )
 
 app = modal.App("clip-engine-render", image=image)
@@ -924,22 +934,10 @@ def _apply_overlays(
 
     if hook_enabled and hook_text.strip():
         hook_txt_file = workdir / "hook.txt"
-        # Wrap at 22 chars/line so individual lines stay within frame width.
-        # Cap to 4 lines with a trailing ellipsis if the text wraps further.
-        _hook_lines = _wrap_text(hook_text, 22).split("\n")
-        _MAX_HOOK_LINES = 4
-        if len(_hook_lines) > _MAX_HOOK_LINES:
-            _hook_lines = _hook_lines[:_MAX_HOOK_LINES]
-            if not _hook_lines[-1].endswith("..."):
-                _hook_lines[-1] = _hook_lines[-1].rstrip() + "..."
+        # Shrink-to-fit: font size and wrap width are solved together so the
+        # full hook always renders — no ellipsis, no line truncation.
+        _hook_lines, hook_fontsize = _compute_hook_fit(hook_text, out_w, out_h)
         hook_txt_file.write_text("\n".join(_hook_lines), encoding="utf-8")
-
-        # Fit fontsize: approximate Montserrat ExtraBold average advance ≈ 0.60 × fontsize.
-        # Ensure the longest wrapped line stays within 92% of the frame width.
-        _longest_line = max(len(l) for l in _hook_lines) if _hook_lines else 1
-        _base_fs = max(44, int(out_h * 0.038))
-        _fit_fs = int((out_w * 0.92) / (0.60 * max(_longest_line, 1)))
-        hook_fontsize = max(min(_base_fs, _fit_fs), 32)
 
         # Colors from config; defaults: white box, black text (per style refs)
         box_color = _html_to_ffmpeg_color(hook_cfg.get("box_color", "#FFFFFF"))
@@ -1086,6 +1084,45 @@ def _wrap_text(text: str, chars_per_line: int = 32) -> str:
     if current:
         lines.append(" ".join(current))
     return "\n".join(lines)
+
+
+def _compute_hook_fit(
+    hook_text: str, out_w: int, out_h: int
+) -> tuple[list[str], int]:
+    """Return ``(wrapped_lines, font_size)`` for the hook overlay.
+
+    Finds the *largest* font size ≥ ``_FONT_FLOOR`` where the full hook text
+    fits within both:
+
+    * **width**: each line ≤ ``_WIDTH_FRAC * out_w`` (using the Montserrat
+      ExtraBold approximate advance of 0.60 × font_size per character).
+    * **height**: total block height ≤ ``_HEIGHT_FRAC * out_h`` with at most
+      ``_MAX_LINES`` lines (line height ≈ 1.2 × font_size for drawtext).
+
+    When no font size satisfies both constraints (pathological — hooks are one
+    LLM sentence), the function returns lines at the font floor with **no
+    truncation**.  The full hook text is *always* rendered; "…" is never
+    appended.
+    """
+    _FONT_FLOOR: int = 30
+    _MAX_LINES: int = 6       # soft target; at the floor we allow more
+    _LINE_HEIGHT: float = 1.2  # drawtext approximate line-height / font-size
+    _WIDTH_FRAC: float = 0.92
+    _HEIGHT_FRAC: float = 0.34
+    _CHAR_ADV: float = 0.60   # Montserrat ExtraBold avg advance ≈ 0.60 × fs
+
+    base_fs = max(44, int(out_h * 0.038))
+
+    for fs in range(base_fs, _FONT_FLOOR - 1, -1):
+        cpl = max(1, int((out_w * _WIDTH_FRAC) / (_CHAR_ADV * fs)))
+        candidate = _wrap_text(hook_text, cpl).split("\n")
+        total_h = len(candidate) * fs * _LINE_HEIGHT
+        if total_h <= out_h * _HEIGHT_FRAC and len(candidate) <= _MAX_LINES:
+            return candidate, fs
+
+    # Pathological case: use floor font size, no truncation
+    cpl = max(1, int((out_w * _WIDTH_FRAC) / (_CHAR_ADV * _FONT_FLOOR)))
+    return _wrap_text(hook_text, cpl).split("\n"), _FONT_FLOOR
 
 
 # ---------------------------------------------------------------------------

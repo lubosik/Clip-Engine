@@ -310,6 +310,61 @@ export const analytics = {
   ],
 };
 
+// Sources — mock data for the Sources view
+export const sources = [
+  {
+    id: 1,
+    source_id: 'youtube:mock001',
+    platform: 'youtube',
+    url: 'https://youtube.com/watch?v=mock001',
+    title: 'The Complete Guide to Progressive Overload',
+    author_handle: 'HouseofHypertrophy',
+    campaign: 'fitness',
+    status: 'done',
+    processed_at: hAgo(3),
+    clip_count: 3,
+    clips: [
+      { id: '1', hook: 'Most people leave 40% of gains on the table', status: 'approved', gate_status: 'ready' },
+      { id: '2', hook: 'Progressive overload is about more than just weight', status: 'pending_review', gate_status: 'ready' },
+      { id: '3', hook: 'The optimal rep range myth explained', status: 'rejected', gate_status: 'didnt_pass' },
+    ],
+    used_ranges_count: 3,
+    thumbnail_url: 'https://i.ytimg.com/vi/mock001/hqdefault.jpg',
+  },
+  {
+    id: 2,
+    source_id: 'youtube:mock002',
+    platform: 'youtube',
+    url: 'https://youtube.com/watch?v=mock002',
+    title: 'Science of Muscle Growth',
+    author_handle: 'JeffNippard',
+    campaign: 'fitness',
+    status: 'partially_done',
+    processed_at: hAgo(12),
+    clip_count: 1,
+    clips: [
+      { id: '4', hook: "This is why you're not building muscle", status: 'pending_review', gate_status: 'ready' },
+    ],
+    used_ranges_count: 1,
+    thumbnail_url: 'https://i.ytimg.com/vi/mock002/hqdefault.jpg',
+  },
+  {
+    id: 3,
+    source_id: 'tiktok:mock003',
+    platform: 'tiktok',
+    url: 'https://tiktok.com/@fitnessguru/video/mock003',
+    title: 'Quick protein hack every lifter needs',
+    author_handle: 'fitnessguru',
+    campaign: 'fitness',
+    status: 'selected',
+    processed_at: null,
+    clip_count: 0,
+    clips: [],
+    used_ranges_count: 0,
+    thumbnail_url: null,
+  },
+];
+
 // Modal spend payload — contract §5
 export const spend = {
   estimated: true,

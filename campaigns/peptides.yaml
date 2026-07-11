@@ -1,0 +1,165 @@
+name: peptides
+enabled: true
+# Production campaign for VICI PEPTIDES. Niche: peptides + looksmaxxing/aesthetics.
+# Nothing here is hardwired into code — swap this file to run a different niche.
+mode: production
+
+creative_direction: |
+  Brand: VICI PEPTIDES. Audience: men 18-40 into fitness, biohacking, TRT,
+  longevity and looksmaxxing. Every clip should make a peptide-curious viewer
+  stop scrolling, feel "I need to know more", and associate the insight with
+  VICI. Pro-peptide, aspirational, credible. Real people talking on podcasts —
+  never animated explainers.
+
+sources:
+  # Podcast / interview footage ONLY (real person on camera). Search terms are
+  # sent verbatim to the Apify YouTube scraper — write them like a human would
+  # type them into YouTube, then filter to long videos.
+  youtube:
+    search_terms:
+      - "peptides podcast interview BPC-157"
+      - "retatrutide experience podcast weight loss"
+      - "CJC-1295 ipamorelin growth hormone podcast"
+      - "More Plates More Dates peptides podcast"
+      - "peptides biohacking longevity podcast interview"
+      - "TB-500 BPC-157 healing podcast results"
+      - "GLP-1 semaglutide tirzepatide body composition podcast"
+      - "peptide therapy hormone optimization interview"
+      - "looksmaxxing peptides aesthetics podcast interview"
+      - "clavicular looksmaxxing interview podcast"
+      - "TRT testosterone looksmaxxing aesthetics podcast"
+      - "Jay Campbell peptides longevity podcast"
+    channels: []
+    exclude_channels:
+      - "TED-Ed"
+      - "TED"
+      - "Kurzgesagt"
+      - "AsapSCIENCE"
+      - "Institute of Human Anatomy"
+    min_view_count: 15000
+    uploaded_within: "year"
+  exclude_keywords:
+    - "animation"
+    - "animated"
+    - "explained in 5 levels"
+    - "cartoon"
+    - "whiteboard"
+  tiktok:
+    profiles: []
+    hashtags: ["peptides", "bpc157", "looksmaxxing", "peptidetherapy"]
+  instagram:
+    profiles: []
+
+ranking:
+  clip_length: [18, 60]
+  max_clips_per_source: 8
+  exhaust_source: true          # reuse the same podcast across runs, new moments only
+  min_score: 0.62
+  ranking_rules: |
+    You are selecting short-form clips for VICI PEPTIDES. Optimise for
+    scroll-stopping, conversion, and topical fit. Pick moments that stand
+    completely on their own.
+
+    HARD TOPICAL GATE (apply FIRST, before anything else): This source is only
+    usable if it substantively discusses PEPTIDES / hormones / TRT, or
+    LOOKSMAXXING / facial aesthetics / the blackpill. If the transcript is
+    really about generic fitness, training splits, body types (ectomorph/
+    endomorph), dieting, fighting, or nutrition WITHOUT a genuine peptide/
+    hormone or looksmaxxing angle, return an EMPTY array []. Do NOT stretch a
+    general fitness clip to fit. A moment only qualifies if it is clearly about
+    one of the campaign topics below — when a moment is merely fitness-adjacent,
+    skip it.
+
+    WHAT THIS CAMPAIGN IS ABOUT (a moment must clearly be one of these):
+    - Peptides: how they work (GH secretagogues stimulating the pituitary,
+      healing/repair, GLP-1 receptor agonism, mitochondrial/skin/anti-aging),
+      what people have discovered on them, benefits, and positive / pro-peptide
+      takes. Named peptides are a strong signal: BPC-157, TB-500, CJC-1295,
+      Ipamorelin, Retatrutide, Semaglutide, Tirzepatide, Sermorelin,
+      Tesamorelin, MOTS-c, GHK-Cu, Epitalon, Selank, Melanotan II, PT-141,
+      Thymosin.
+    - First-hand experiences and opinions of being on peptides (results,
+      recovery, sleep, fat loss, how they felt) — authentic and compelling.
+    - Looksmaxxing / aesthetics / the blackpill: improving how you look and
+      feel, facial-aesthetics rating culture, jaw/canthal tilt/hunter eyes,
+      mewing, and the overlap of hormones/peptides with looking better.
+      Content about or by "Clavicular" and natural looksmaxxing fits here.
+
+    WHAT MAKES A GOOD CLIP (be strict):
+    - COHERENCE IS MANDATORY. The clip MUST begin at the start of a complete
+      spoken sentence/point and END at a natural finish of that point. It may
+      never start or end mid-sentence, and must never sound like we dropped
+      into the middle of a thought. If the strongest idea starts mid-segment,
+      set the start to the first word of that sentence; extend the end to the
+      last word of the concluding sentence.
+    - Self-contained: a first-time viewer with zero context understands the
+      whole point start to finish.
+    - Strong open: the first sentence must earn a stop-scroll in ~2 seconds —
+      a counterintuitive claim, a surprising result, a bold opinion with a
+      reason, a specific number, or a vivid personal story.
+    - The HOOK you write must describe the exact point made in the OPENING
+      sentence of the clip, so the on-screen hook and the first words match.
+    - Prefer specificity (named peptides, doses in passing, concrete outcomes,
+      timeframes) over vague generalities.
+
+    EXCLUDE (skip when in doubt):
+    - Explicit sourcing / where-to-buy / vendor call-outs.
+    - Step-by-step self-harm (e.g. "bone smashing" instructions) or dangerous
+      dosing framed as prescriptive medical advice.
+    - Guaranteed-cure medical claims stated as settled fact.
+    - Hateful, degrading, or harassing content, and anything that violates
+      TikTok / Instagram / X community guidelines.
+
+template:
+  aspect: "9:16"
+  resolution: [1080, 1920]
+  captions:
+    style: "word_by_word"
+    font: "assets/peptides/Montserrat-ExtraBold.ttf"
+    base_color: "#FFFFFF"
+    highlight_color: "#00E5FF"
+    outline_color: "#000000"
+    outline_px: 6
+    position: "mid_low"
+    max_words_per_line: 3
+  hook:
+    enabled: true
+    show_seconds: [0, 8]
+    source: "ranking"
+    font: "assets/peptides/Montserrat-ExtraBold.ttf"
+    box_color: "#FFFFFF"
+    text_color: "#000000"
+  lower_third:
+    show_source_handle: true
+    format: "via @{source_handle}"
+  watermark:
+    # Transparent white VICI PEPTIDES wordmark (no background box), high
+    # contrast + soft shadow so it pops on any footage. On screen the whole clip.
+    image: "assets/peptides/logo.png"
+    position: "bottom"
+    opacity: 0.95
+    scale: 0.34
+  corner_badge:
+    image: null
+  outro:
+    enabled: true
+    clip: "assets/peptides/outro.mov"
+    audio: "keep"
+
+destinations:
+  postiz_channels: ["instagram-standalone", "x"]
+  schedule:
+    posts_per_day: 1
+    times: ["17:00"]
+    timezone: "America/New_York"
+  caption_template: |
+    {hook}
+
+    via @{source_handle}
+    {hashtags}
+  hashtags: ["#peptides", "#bpc157", "#looksmaxxing", "#biohacking", "#longevity"]
+  autopost: false
+
+analytics:
+  track: true
+  pull_day: "monday"

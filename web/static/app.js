@@ -19,19 +19,20 @@ import * as fixtures from './fixtures.js';
 import { initQueue, refreshQueue } from './queue.js';
 import { initCampaigns } from './campaigns.js';
 import { initAnalytics } from './analytics.js';
+import { initSources } from './sources.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const TOKEN_KEY = 'clipEngineToken';
 const POLL_MS   = 60_000;
-const VIEWS     = ['queue', 'campaigns', 'analytics'];
+const VIEWS     = ['queue', 'campaigns', 'analytics', 'sources'];
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let _activeTab        = 'queue';
 let _pollTimer        = null;
 let _lastPendingCount = 0;
-let _viewInitialized  = { queue: false, campaigns: false, analytics: false };
+let _viewInitialized  = { queue: false, campaigns: false, analytics: false, sources: false };
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
@@ -335,7 +336,7 @@ function _activateTab(tab) {
   });
 
   // Update header title
-  const titles = { queue: 'Clip Engine', campaigns: 'Campaigns', analytics: 'Analytics' };
+  const titles = { queue: 'Clip Engine', campaigns: 'Campaigns', analytics: 'Analytics', sources: 'Sources' };
   const titleEl = document.getElementById('header-title');
   if (titleEl) titleEl.textContent = titles[tab] || 'Clip Engine';
 
@@ -358,6 +359,7 @@ function _initView(tab) {
     case 'queue':     initQueue(container, ctx);     break;
     case 'campaigns': initCampaigns(container, ctx); break;
     case 'analytics': initAnalytics(container, ctx); break;
+    case 'sources':   initSources(container, ctx);   break;
   }
 }
 
@@ -673,7 +675,7 @@ function _logout() {
   clearInterval(_pollTimer);
   _pollTimer = null;
   _lastPendingCount = 0;
-  _viewInitialized = { queue: false, campaigns: false, analytics: false };
+  _viewInitialized = { queue: false, campaigns: false, analytics: false, sources: false };
   _showAuth();
 }
 
@@ -683,6 +685,7 @@ function _onUnauthorized() {
   setToken('');
   clearInterval(_pollTimer);
   _pollTimer = null;
+  _viewInitialized = { queue: false, campaigns: false, analytics: false, sources: false };
   setTimeout(() => _showAuth('Session expired. Please enter the password.'), 800);
 }
 

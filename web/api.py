@@ -1355,6 +1355,22 @@ def trigger_run(
     max_apify_spend = _cap("max_apify_spend", DEFAULT_ONDEMAND_APIFY_SPEND)
     max_modal_spend = _cap("max_modal_spend", DEFAULT_ONDEMAND_MODAL_SPEND)
 
+    # Optional clip-target override for demo runs (number of READY clips to stop at).
+    clip_target = body.get("clip_target")
+    if clip_target is not None:
+        try:
+            clip_target = int(clip_target)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": "clip_target must be an integer", "code": 422},
+            )
+        if clip_target <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": "clip_target must be greater than 0", "code": 422},
+            )
+
     # Validate campaign exists.
     slug = slugify(campaign)
     campaigns_dir = Path(__file__).resolve().parent.parent / "campaigns"
@@ -1386,6 +1402,8 @@ def trigger_run(
     ]
     if run_mode is not None:
         cmd += ["--mode", run_mode]
+    if clip_target is not None:
+        cmd += ["--clip-target", str(clip_target)]
 
     try:
         proc = subprocess.Popen(
@@ -1447,6 +1465,154 @@ def get_run_log(campaign: str, lines: int = 200) -> dict[str, Any]:
         )
 
     return {"campaign": slug, "path": str(log_path), "lines": tail}
+
+
+# ---------------------------------------------------------------------------
+# /api/sources — read view of every source video that has been mined
+# ---------------------------------------------------------------------------
+
+def _source_thumbnail_url(source: Any) -> str | None:
+    """Derive a thumbnail URL for a source row.
+
+    YouTube: use i.ytimg.com hqdefault (permanent, no expiry).
+    TikTok:  videoMeta.coverUrl from Apify actor metadata (signed, may expire).
+    Others:  top-level thumbnailUrl / thumbnail / coverUrl in metadata.
+    """
+    platform = getattr(source, "platform", "") or ""
+    source_id = getattr(source, "source_id", "") or ""
+    meta = getattr(source, "source_metadata", None) or {}
+    if not isinstance(meta, dict):
+        meta = {}
+
+    if platform == "youtube":
+        native_id = source_id.split(":", 1)[1] if ":" in source_id else source_id
+        if native_id:
+            return f"https://i.ytimg.com/vi/{native_id}/hqdefault.jpg"
+        # fallback to metadata
+        return meta.get("thumbnailUrl") or None
+
+    if platform == "tiktok":
+        video_meta = meta.get("videoMeta") or {}
+        if isinstance(video_meta, dict):
+            cover = video_meta.get("coverUrl")
+            if cover:
+                return str(cover)
+
+    # Generic fallback for any platform
+    for key in ("thumbnailUrl", "thumbnail", "coverUrl", "cover"):
+        val = meta.get(key)
+        if val and isinstance(val, str):
+            return val
+
+    return None
+
+
+@app.get("/api/sources", dependencies=[Depends(require_auth)])
+def list_sources(
+    campaign: str | None = Query(default=None),
+    q: str | None = Query(default=None, description="Search title, handle, or URL (case-insensitive)"),
+) -> list[dict[str, Any]]:
+    """GET /api/sources — every source video the engine has mined.
+
+    Returns sources that are either:
+      - status != 'pending'  (they were at least selected/partially done/done), OR
+      - they have at least one Clip row (edge case: source re-queued)
+
+    Sorted newest-first by COALESCE(processed_at, updated_at).
+    Each item includes clip_count + a clips list [{id, hook, status, gate_status}]
+    so the view doubles as a dedupe audit.
+    Supports ?campaign= filter and ?q= search (applied server-side, both optional).
+    """
+    _db_required()
+
+    try:
+        from sqlalchemy import or_, func as _func
+        from sqlalchemy.orm import selectinload
+
+        with get_session() as session:
+            # Scalar subquery: source_ids that have at least one clip.
+            # Use .scalar_subquery() to avoid the SAWarning when passed to .in_()
+            has_clips_sq = (
+                session.query(Clip.source_id)
+                .filter(Clip.source_id.isnot(None))
+                .distinct()
+                .scalar_subquery()
+            )
+
+            q_obj = (
+                session.query(Source)
+                .options(selectinload(Source.clips))
+                .filter(
+                    or_(
+                        Source.status != "pending",
+                        Source.source_id.in_(has_clips_sq),
+                    )
+                )
+            )
+
+            if campaign:
+                q_obj = q_obj.filter(Source.campaign == campaign)
+
+            if q:
+                pattern = f"%{q}%"
+                q_obj = q_obj.filter(
+                    or_(
+                        Source.title.ilike(pattern),
+                        Source.author_handle.ilike(pattern),
+                        Source.url.ilike(pattern),
+                    )
+                )
+
+            q_obj = q_obj.order_by(
+                _func.coalesce(Source.processed_at, Source.updated_at).desc()
+            )
+
+            sources = q_obj.all()
+
+        result: list[dict[str, Any]] = []
+        for src in sources:
+            clips_sorted = sorted(src.clips or [], key=lambda c: c.id)
+            clips_list = [
+                {
+                    "id": str(c.id),
+                    "hook": (c.hook or "")[:160],
+                    "status": c.status or "pending_review",
+                    "gate_status": getattr(c, "gate_status", "pending") or "pending",
+                }
+                for c in clips_sorted
+            ]
+            processed_at = src.processed_at
+            if isinstance(processed_at, datetime):
+                if processed_at.tzinfo is None:
+                    processed_at = processed_at.replace(tzinfo=timezone.utc)
+                processed_at = processed_at.isoformat()
+
+            result.append({
+                "id": src.id,
+                "source_id": src.source_id,
+                "platform": src.platform or "",
+                "url": src.url or "",
+                "title": src.title or "",
+                "author_handle": src.author_handle or "",
+                "campaign": src.campaign or "",
+                "status": src.status or "pending",
+                "processed_at": processed_at,
+                "clip_count": len(clips_sorted),
+                "clips": clips_list,
+                "used_ranges_count": len(src.used_ranges or []),
+                "thumbnail_url": _source_thumbnail_url(src),
+            })
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("list_sources failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Database query failed", "code": 500},
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -362,6 +362,7 @@ def run_campaign(
     run_mode: str | None = None,
     max_modal_spend: float | None = None,
     max_apify_spend: float | None = None,
+    clip_target: int | None = None,
 ) -> None:
     """Execute a full pipeline run for one campaign.
 
@@ -369,6 +370,8 @@ def run_campaign(
     max_modal_spend: abort render stage if estimated Modal cost exceeds this USD value.
     max_apify_spend: abort after discovery if estimated Apify cost exceeds this USD value.
         Rough rate: $0.01 per discovered item (documented approximation).
+    clip_target: override the number of READY clips a demo run stops at
+        (defaults to DEMO_CLIP_TARGET). Ignored in production mode.
     """
     from core.config import load_campaign
     from core.apify import Apify
@@ -481,8 +484,11 @@ def run_campaign(
     # Demo runs target DEMO_CLIP_TARGET *ready* clips (gate_status='ready').
     # All renders (regardless of gate outcome) count toward DEMO_RENDER_CAP
     # to prevent unbounded spend when the gate keeps failing clips.
-    clip_target = DEMO_CLIP_TARGET if effective_mode == "demo" else None
-    render_cap = DEMO_RENDER_CAP if effective_mode == "demo" else None
+    demo_target = clip_target if clip_target is not None else DEMO_CLIP_TARGET
+    clip_target = demo_target if effective_mode == "demo" else None
+    # Give the render cap headroom above the ready-clip target so the gate can
+    # fail a few clips without starving the run before it hits the target.
+    render_cap = max(DEMO_RENDER_CAP, demo_target * 2) if effective_mode == "demo" else None
 
     total_renders = 0   # every clip rendered (regardless of gate status)
     total_ready = 0     # clips that passed the gate (gate_status=='ready')
@@ -568,6 +574,14 @@ def main() -> None:
              "Rough rate: $0.01/item.",
     )
     parser.add_argument(
+        "--clip-target",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Number of READY clips a demo run stops at (default: %d). "
+             "Ignored in production mode." % DEMO_CLIP_TARGET,
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Run the full pipeline but skip Postiz posting (passed to scheduler)",
@@ -578,6 +592,7 @@ def main() -> None:
         run_mode=args.mode,
         max_modal_spend=args.max_modal_spend,
         max_apify_spend=args.max_apify_spend,
+        clip_target=args.clip_target,
     )
 
     if args.all:

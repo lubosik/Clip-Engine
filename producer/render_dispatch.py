@@ -151,11 +151,13 @@ def ensure_campaign_assets_on_r2(cfg: Any) -> dict[str, str | None]:
             continue
 
         try:
-            if not r2.exists(key):
-                log.info("Uploading campaign asset: %s → %s", local_file.name, key)
-                r2.upload_file(local_file, key)
-            else:
-                log.debug("Campaign asset already in R2: %s", key)
+            # Always (re)upload once per process so the CURRENTLY DEPLOYED asset
+            # is authoritative. The previous skip-if-exists left stale assets in
+            # R2 (e.g. an old boxed logo) winning over a freshly deployed one —
+            # early renders in a run picked up the stale file. The per-process
+            # cache below still prevents redundant re-uploads within a run.
+            log.info("Uploading campaign asset: %s → %s", local_file.name, key)
+            r2.upload_file(local_file, key)
             _ASSETS_UPLOADED_CACHE.add(cache_key)
             result[role] = key
         except Exception as exc:
