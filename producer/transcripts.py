@@ -29,6 +29,15 @@ ACTOR_YT_TRANSCRIPT = "pintostudio/youtube-transcript-scraper"
 ACTOR_TT_TRANSCRIPT = "agentx/tiktok-transcript"
 
 
+class TranscriptFetchError(RuntimeError):
+    """The transcript actor RUN failed (outage, usage limit, auth).
+
+    Distinct from a video that genuinely has no transcript (which returns []).
+    Callers must NOT mark the source done on this error — the fetch should be
+    retried on a future run.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Normalisation helpers
 # ---------------------------------------------------------------------------
@@ -129,7 +138,7 @@ def fetch_youtube_transcript(url: str, apify: "Apify") -> list[dict]:
             "YouTube transcript fetch failed",
             extra={"url": url, "error": str(exc)},
         )
-        return []
+        raise TranscriptFetchError(f"YouTube transcript actor failed: {exc}") from exc
 
     if not items:
         log.warning("No transcript returned for YouTube video", extra={"url": url})
@@ -173,7 +182,7 @@ def fetch_tiktok_transcript(url: str, apify: "Apify") -> list[dict]:
             "TikTok transcript fetch failed",
             extra={"url": url, "error": str(exc)},
         )
-        return []
+        raise TranscriptFetchError(f"TikTok transcript actor failed: {exc}") from exc
 
     if not items:
         log.warning("No transcript returned for TikTok video", extra={"url": url})

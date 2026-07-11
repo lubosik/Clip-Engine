@@ -82,7 +82,7 @@ def _process_source(
     from core.models import Source as SourceModel, Clip
     from producer.dedupe import mark_source_status, update_used_ranges
     from producer.comments import pull_and_store_comments
-    from producer.transcripts import fetch_and_store_transcript
+    from producer.transcripts import fetch_and_store_transcript, TranscriptFetchError
     from producer.ranker import rank_clips, select_clips
     from producer.download import download_source, cleanup_source
     from producer.render_dispatch import render_and_record, estimate_modal_batch_cost
@@ -119,14 +119,24 @@ def _process_source(
 
         # Stage 4: transcript
         ig_raw = source.get("raw") if platform == "instagram" else None
-        segments = fetch_and_store_transcript(
-            session=session,
-            source_id=source_id,
-            platform=platform,
-            url=url,
-            apify=apify,
-            ig_raw_item=ig_raw,
-        )
+        try:
+            segments = fetch_and_store_transcript(
+                session=session,
+                source_id=source_id,
+                platform=platform,
+                url=url,
+                apify=apify,
+                ig_raw_item=ig_raw,
+            )
+        except TranscriptFetchError as exc:
+            # Transient actor failure (Apify outage / usage limit) — do NOT
+            # mark the source done; leave it for a future run to retry.
+            log.warning(
+                "Transcript fetch failed (transient); leaving source for a future run",
+                extra={"source_id": source_id, "error": str(exc)},
+            )
+            session.rollback()
+            return []
         session.commit()
 
         if not segments:
@@ -356,6 +366,58 @@ def _warn_if_near_monthly_budget(session: Any, source_id: str) -> None:
         pass
 
 
+def _extract_view_count(meta: Any) -> int:
+    """Best-effort view count from stored source metadata (platform-specific keys)."""
+    if not isinstance(meta, dict):
+        return 0
+    for key in ("view_count", "viewCount", "playCount", "videoPlayCount"):
+        val = meta.get(key)
+        if isinstance(val, bool):
+            continue
+        if isinstance(val, (int, float)):
+            return int(val)
+        if isinstance(val, str) and val.isdigit():
+            return int(val)
+    return 0
+
+
+def _load_backlog_sources(session: Any, campaign_name: str) -> list[dict[str, Any]]:
+    """Load unfinished sources (pending/selected/partially_done) from the DB as
+    candidate dicts, so a run can proceed when discovery yields nothing (e.g.
+    Apify outage or usage limit).
+
+    Sources that already have a stored transcript sort first — they need no
+    Apify call at all — then by view count descending.
+    """
+    from core.models import Source, Transcript
+
+    rows = (
+        session.query(Source, Transcript.id)
+        .outerjoin(Transcript, Transcript.source_id == Source.source_id)
+        .filter(
+            Source.campaign == campaign_name,
+            Source.status.in_(("pending", "selected", "partially_done")),
+        )
+        .all()
+    )
+
+    backlog: list[tuple[bool, int, dict[str, Any]]] = []
+    for source, transcript_id in rows:
+        candidate = {
+            "source_id": source.source_id,
+            "platform": source.platform,
+            "url": source.url,
+            "title": source.title,
+            "author_handle": source.author_handle,
+            "raw": source.source_metadata or {},
+        }
+        candidate["view_count"] = _extract_view_count(source.source_metadata)
+        backlog.append((transcript_id is not None, candidate["view_count"], candidate))
+
+    backlog.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return [c for _, _, c in backlog]
+
+
 def run_campaign(
     campaign_name: str,
     *,
@@ -423,8 +485,13 @@ def run_campaign(
     # Stage 1: discover
     candidates = discover_all(campaign_cfg, apify)
     if not candidates:
-        log.warning("No candidates discovered", extra={"campaign": campaign_name})
-        return
+        # Do NOT abort: an Apify outage/usage-limit yields 0 candidates, but the
+        # DB may hold a backlog of unfinished sources (many with cached
+        # transcripts) that the rest of the pipeline can still process.
+        log.warning(
+            "No candidates discovered; will fall back to unfinished DB sources",
+            extra={"campaign": campaign_name},
+        )
 
     # Apify spend guard: rough estimate of cost for this discovery batch.
     # Rate: $0.01 per discovered item (approximation documented in render_dispatch.py).
@@ -464,6 +531,17 @@ def run_campaign(
         new_ids = {c["source_id"] for c in new_candidates}
         to_process = new_candidates + [c for c in not_done if c["source_id"] not in new_ids]
         to_process = sort_by_engagement(to_process)
+
+        if not to_process:
+            # Backlog fallback: discovery produced nothing usable (Apify outage
+            # or everything rediscovered is done) — rinse the unfinished
+            # sources already in the DB instead of giving up.
+            to_process = _load_backlog_sources(session, campaign_name)
+            if to_process:
+                log.info(
+                    "Discovery yielded nothing new; processing DB backlog of unfinished sources",
+                    extra={"campaign": campaign_name, "count": len(to_process)},
+                )
 
         if not to_process:
             log.info("All candidates already processed", extra={"campaign": campaign_name})
