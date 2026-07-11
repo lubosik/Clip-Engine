@@ -19,11 +19,16 @@ from core.sentences import build_sentence_spans, snap_to_sentences
 from core.settings import get_settings
 from core.topics import (
     FEWSHOT_BOUNDARY_EXAMPLES,
-    segment_transcript,
+    _validate_topic_segments,
     snap_end_off_next_topic,
 )
 
 log = logging.getLogger(__name__)
+
+# ~12s LLM-prompt chunks: the discovery actor emits 2-4s transcript fragments;
+# merging them strips thousands of redundant timestamp markers per long podcast
+# with no word loss. Boundary snapping still uses the full-resolution transcript.
+_PROMPT_CHUNK_SECONDS = 12.0
 
 
 def _extract_json_array(text: str) -> list[dict] | None:
@@ -42,6 +47,66 @@ def _extract_json_array(text: str) -> list[dict] | None:
     except json.JSONDecodeError:
         pass
     return None
+
+
+def _compress_transcript(
+    transcript: list[dict], target_s: float = _PROMPT_CHUNK_SECONDS
+) -> list[dict]:
+    """
+    Merge consecutive transcript segments into ~target_s chunks for the prompt.
+
+    Reduces input-token cost on long transcripts by collapsing the per-fragment
+    ``[x.xs-y.ys]`` markers. Text is preserved verbatim (space-joined); only the
+    marker granularity is coarsened. Returns [{start, end, text}].
+    """
+    out: list[dict] = []
+    cur: dict | None = None
+    for seg in transcript:
+        try:
+            s = float(seg["start"])
+            e = float(seg["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        if cur is None:
+            cur = {"start": s, "end": e, "text": text}
+        else:
+            cur["text"] += " " + text
+            cur["end"] = e
+        if cur["end"] - cur["start"] >= target_s:
+            out.append(cur)
+            cur = None
+    if cur is not None:
+        out.append(cur)
+    return out
+
+
+def _parse_ranking_response(text: str) -> tuple[list, list]:
+    """
+    Parse the combined ranking response into (clips, topics).
+
+    Preferred shape is a JSON object ``{"topics": [...], "clips": [...]}``.
+    Falls back to a bare JSON array (legacy / model slip) treated as clips with
+    no topics. Returns ([], []) when nothing parseable is found.
+    """
+    obj_match = re.search(r"\{.*\}", text, re.DOTALL)
+    if obj_match:
+        try:
+            obj = json.loads(obj_match.group())
+            if isinstance(obj, dict) and ("clips" in obj or "topics" in obj):
+                clips = obj.get("clips") or []
+                topics = obj.get("topics") or []
+                if isinstance(clips, list):
+                    return clips, (topics if isinstance(topics, list) else [])
+        except json.JSONDecodeError:
+            pass
+    # Fallback: a bare array of clips.
+    arr = _extract_json_array(text)
+    if arr is not None:
+        return arr, []
+    return [], []
 
 
 def _validate_moments(raw: list[Any], clip_len: tuple[int, int]) -> list[dict]:
@@ -101,9 +166,13 @@ def _build_prompt(
     comment_summary: str | None,
     clip_len: tuple[int, int],
     max_clips: int,
-    topic_segments: list[dict] | None = None,
 ) -> str:
-    """Build the ranking prompt."""
+    """Build the combined segmentation + ranking prompt.
+
+    ONE call does both jobs: it first splits the transcript into self-contained
+    topic segments, then selects clip candidates whose boundaries align to those
+    segments. This avoids a second full-transcript LLM call per source.
+    """
     seg_lines = "\n".join(
         f"[{seg['start']:.1f}s-{seg['end']:.1f}s] {seg['text']}" for seg in transcript
     )
@@ -111,23 +180,6 @@ def _build_prompt(
     comment_section = ""
     if comment_summary:
         comment_section = f"\n\nCOMMENT SIGNAL (top recurring themes from audience):\n{comment_summary}"
-
-    # If a segmentation pass ran, offer the topic segments as the candidate pool
-    # so the model selects clips from complete topics rather than by the clock.
-    topic_section = ""
-    if topic_segments:
-        topic_lines = "\n".join(
-            f"[{t['start']:.1f}s-{t['end']:.1f}s] {t.get('summary', '')}"
-            + (f"  (ends because: {t['ends_because']})" if t.get("ends_because") else "")
-            for t in topic_segments
-        )
-        topic_section = (
-            "\n\nTOPIC SEGMENTS (a segmentation pass already split this transcript into "
-            "self-contained topics — each is ONE complete idea; prefer choosing clip "
-            "boundaries that align to these segments, and NEVER let a clip's end cross "
-            "into the start of the following segment):\n"
-            f"{topic_lines}"
-        )
 
     return f"""You are a clip ranking assistant. Analyse the transcript below and identify the best moments to cut as short-form clips.
 
@@ -151,23 +203,37 @@ so trim the end back to where the prior thought completed. Topic completeness wi
 over hitting a target length.
 
 {FEWSHOT_BOUNDARY_EXAMPLES}
-{topic_section}
 
 TRANSCRIPT (timestamps in seconds):
 {seg_lines}
 
-Return ONLY a JSON array (no prose, no code fences) of the top moments, best-first, in this exact shape:
-[
-  {{
-    "start": <float seconds — must be the first word of a sentence>,
-    "end": <float seconds — must be the last word of a sentence>,
-    "score": <float 0.0-1.0>,
-    "hook": "<one compelling sentence summarising the opening sentence of this clip>",
-    "reason": "<brief explanation why this moment is strong>"
-  }}
-]
+FIRST split the transcript into self-contained topic segments (each is ONE complete \
+idea, ending where its thought resolves — NOT at the first word of the next subject). \
+THEN select the best clips, choosing each clip's boundaries to align with those \
+segments so no clip's end crosses into the start of the following segment.
 
-If no moments meet the criteria, return an empty array: []
+Return ONLY this JSON object (no prose, no code fences), best clips first:
+{{
+  "topics": [
+    {{
+      "start": <float seconds — first word of the topic>,
+      "end": <float seconds — last word of the resolving thought>,
+      "summary": "<one line: what this topic is about>",
+      "ends_because": "<host asks new question / subject change / wrap-up cue / story resolves>"
+    }}
+  ],
+  "clips": [
+    {{
+      "start": <float seconds — must be the first word of a sentence>,
+      "end": <float seconds — must be the last word of a sentence, on a topic boundary>,
+      "score": <float 0.0-1.0>,
+      "hook": "<one compelling sentence summarising the opening sentence of this clip>",
+      "reason": "<brief explanation why this moment is strong>"
+    }}
+  ]
+}}
+
+If no moments meet the criteria, return {{"topics": [], "clips": []}}.
 """
 
 
@@ -218,15 +284,15 @@ def rank_moments(
     else:
         client = anthropic.Anthropic(api_key=api_key)
 
-    # Segmentation pass: split the transcript into self-contained topic segments
-    # BEFORE selection so clip boundaries are chosen semantically, not by clock.
-    # Best-effort — returns [] on any failure and the ranker proceeds without it.
-    topic_segments = segment_transcript(transcript, clip_len)
-    if topic_segments:
-        log.info("Topic segmentation produced %d segments", len(topic_segments))
+    # Compress the transcript for the prompt only (merge 2-4s fragments into
+    # ~12s chunks) — big input-token saving on long podcasts. Boundary snapping
+    # below still uses the full-resolution `transcript`, so precision is intact.
+    prompt_transcript = _compress_transcript(transcript)
 
+    # ONE combined call does segmentation + ranking (topics + clips together),
+    # instead of a second full-transcript segmentation call.
     prompt = _build_prompt(
-        transcript, rules, comment_summary, clip_len, max_clips, topic_segments
+        prompt_transcript, rules, comment_summary, clip_len, max_clips
     )
 
     def _call() -> str:
@@ -241,22 +307,26 @@ def rank_moments(
     response_text = _call()
     log.debug("LLM raw response", extra={"length": len(response_text)})
 
-    moments_raw = _extract_json_array(response_text)
+    moments_raw, topics_raw = _parse_ranking_response(response_text)
 
-    if moments_raw is None:
+    if not moments_raw and not topics_raw:
         log.warning(
-            "LLM response did not contain a parseable JSON array; retrying once",
+            "LLM response did not contain parseable JSON; retrying once",
             extra={"response_preview": response_text[:300]},
         )
         response_text = _call()
-        moments_raw = _extract_json_array(response_text)
+        moments_raw, topics_raw = _parse_ranking_response(response_text)
 
-    if moments_raw is None:
+    if not moments_raw:
         log.error(
-            "LLM failed to return a JSON array after retry; returning empty",
+            "LLM returned no clips after retry; returning empty",
             extra={"response_preview": response_text[:300]},
         )
         return []
+
+    topic_segments = _validate_topic_segments(topics_raw)
+    if topic_segments:
+        log.info("Ranking response included %d topic segments", len(topic_segments))
 
     validated = _validate_moments(moments_raw, clip_len)
 
