@@ -6,7 +6,7 @@
  *   - clip video + thumb endpoints: network-only
  */
 
-const CACHE_NAME = 'clip-engine-static-v9';
+const CACHE_NAME = 'clip-engine-static-v10';
 
 const PRECACHE = [
   '/',
@@ -60,10 +60,17 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // 1. Never cache API calls, video, or thumb streams.
+  // 1. Never intercept API calls, non-GET, cross-origin requests (presigned
+  //    R2 media), media elements, or Range requests. iOS Safari refuses to
+  //    play <video> whose range requests are answered through a service
+  //    worker respondWith() — the hero video renders blank on mobile.
   if (
+    event.request.method !== 'GET' ||
+    url.origin !== self.location.origin ||
     url.pathname.startsWith('/api/') ||
-    event.request.method !== 'GET'
+    event.request.headers.has('range') ||
+    event.request.destination === 'video' ||
+    event.request.destination === 'audio'
   ) {
     // Network-only — let the request fall through without touching cache.
     return;
