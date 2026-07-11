@@ -31,6 +31,49 @@ log = logging.getLogger(__name__)
 _PROMPT_CHUNK_SECONDS = 12.0
 
 
+def create_completion(client: Any, model: str, max_tokens: int, messages: list) -> Any:
+    """
+    Call messages.create with extended thinking DISABLED.
+
+    Ranking, segmentation and the review gate are structured-extraction tasks
+    that don't benefit from extended thinking — and on thinking-on-by-default
+    models (Sonnet 5, Opus 4.8, Fable 5) leaving it on burns the whole
+    max_tokens budget on reasoning (empty/no JSON, higher cost). Disabling it
+    keeps those models fast and cheap. Models that reject the `thinking`
+    parameter fall back to a plain call.
+    """
+    try:
+        return client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            thinking={"type": "disabled"},
+            messages=messages,
+        )
+    except Exception as exc:  # noqa: BLE001 - only retry the thinking-param case
+        if "thinking" in str(exc).lower():
+            return client.messages.create(
+                model=model, max_tokens=max_tokens, messages=messages
+            )
+        raise
+
+
+def extract_text(message: Any) -> str:
+    """
+    Return the first text block's text from an Anthropic Messages response.
+
+    Thinking-on models (Sonnet 5, Opus 4.8, Fable 5, …) put a ThinkingBlock at
+    content[0], so `content[0].text` raises AttributeError. Scan for the first
+    block that actually carries text instead of assuming position 0.
+    """
+    for block in getattr(message, "content", None) or []:
+        if getattr(block, "type", None) == "text":
+            return block.text
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            return text
+    return ""
+
+
 def _extract_json_array(text: str) -> list[dict] | None:
     """
     Extract the first JSON array from a string, even if surrounded by prose.
@@ -296,12 +339,10 @@ def rank_moments(
     )
 
     def _call() -> str:
-        message = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
+        message = create_completion(
+            client, model, 4096, [{"role": "user", "content": prompt}]
         )
-        return message.content[0].text if message.content else ""
+        return extract_text(message)
 
     # First attempt
     response_text = _call()

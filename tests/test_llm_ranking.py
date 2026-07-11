@@ -7,7 +7,81 @@ combined segmentation+ranking response parser (one call returns topics + clips).
 
 from __future__ import annotations
 
-from core.llm import _compress_transcript, _parse_ranking_response
+from core.llm import (
+    _compress_transcript,
+    _parse_ranking_response,
+    create_completion,
+    extract_text,
+)
+
+
+class _Block:
+    def __init__(self, type_, text=None):
+        self.type = type_
+        if text is not None:
+            self.text = text
+
+
+class _Msg:
+    def __init__(self, content):
+        self.content = content
+
+
+class TestExtractText:
+    def test_plain_text_block(self):
+        assert extract_text(_Msg([_Block("text", "hello")])) == "hello"
+
+    def test_skips_leading_thinking_block(self):
+        # Thinking-on models (Sonnet 5, Opus 4.8) put a ThinkingBlock at [0].
+        msg = _Msg([_Block("thinking"), _Block("text", "the answer")])
+        assert extract_text(msg) == "the answer"
+
+    def test_empty_content(self):
+        assert extract_text(_Msg([])) == ""
+        assert extract_text(_Msg(None)) == ""
+
+
+class TestCreateCompletion:
+    def test_disables_thinking(self):
+        calls = []
+
+        class Client:
+            class messages:
+                @staticmethod
+                def create(**kwargs):
+                    calls.append(kwargs)
+                    return _Msg([_Block("text", "ok")])
+
+        create_completion(Client(), "m", 512, [{"role": "user", "content": "x"}])
+        assert calls[0]["thinking"] == {"type": "disabled"}
+
+    def test_falls_back_when_thinking_rejected(self):
+        attempts = []
+
+        class Client:
+            class messages:
+                @staticmethod
+                def create(**kwargs):
+                    attempts.append("thinking" in kwargs)
+                    if "thinking" in kwargs:
+                        raise ValueError("thinking is not supported on this model")
+                    return _Msg([_Block("text", "ok")])
+
+        msg = create_completion(Client(), "m", 512, [{"role": "user", "content": "x"}])
+        assert extract_text(msg) == "ok"
+        assert attempts == [True, False]  # tried with thinking, retried without
+
+    def test_non_thinking_error_propagates(self):
+        class Client:
+            class messages:
+                @staticmethod
+                def create(**kwargs):
+                    raise ValueError("rate limit exceeded")
+
+        import pytest
+
+        with pytest.raises(ValueError, match="rate limit"):
+            create_completion(Client(), "m", 512, [{"role": "user", "content": "x"}])
 
 
 class TestCompressTranscript:

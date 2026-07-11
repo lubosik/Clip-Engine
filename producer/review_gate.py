@@ -241,12 +241,11 @@ def _vision_llm_call(
         ),
     })
 
-    message = client.messages.create(
-        model=model,
-        max_tokens=512,
-        messages=[{"role": "user", "content": content}],
+    from core.llm import create_completion, extract_text
+    message = create_completion(
+        client, model, 512, [{"role": "user", "content": content}]
     )
-    raw = message.content[0].text if message.content else ""
+    raw = extract_text(message)
     log.debug("Vision LLM raw response (len=%d): %s", len(raw), raw[:400])
 
     return _parse_json_object(raw)
@@ -364,12 +363,11 @@ Return ONLY this JSON (no prose, no code fences, no markdown):
   }}
 }}"""
 
-    message = client.messages.create(
-        model=model,
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}],
+    from core.llm import create_completion, extract_text
+    message = create_completion(
+        client, model, 512, [{"role": "user", "content": prompt}]
     )
-    raw = message.content[0].text if message.content else ""
+    raw = extract_text(message)
     log.debug("Content LLM raw response (len=%d): %s", len(raw), raw[:400])
 
     return _parse_json_object(raw)
