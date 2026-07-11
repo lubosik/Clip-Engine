@@ -475,3 +475,15 @@ Two features from the operator brief. All work done; deploying via `railway up` 
 - Net: ~halves per-source LLM cost (one call not two) + trims input tokens on long podcasts; quality held (same model, boundaries verified). Gate cost unchanged (per-clip, already scoped).
 
 **OPEN (unchanged + new):** safety-gate-vs-niche decision (medical_claims auto-fail rejects peptide clips — still needs operator call); POSTIZ_API_URL missing in Railway; rotate chat-pasted creds; GitHub push blocked (PAT revoked). (OpenRouter credit blocker RESOLVED — user topped up $10 2026-07-11.)
+
+### 2026-07-11 (later) — Model optimization: Sonnet 4.6 → Sonnet 5 (cheaper + smarter)
+User asked to cut LLM cost further by changing model (keep/raise quality). Investigated on OpenRouter (real billing source, not first-party pricing).
+- **OpenRouter Anthropic pricing (in/out per 1M):** haiku-4.5 $1/$5; sonnet-5 $2/$10; sonnet-4.6 (current) $3/$15; opus-4.8 $5/$25. So `anthropic/claude-sonnet-5` is ~⅓ cheaper per token than 4.6 AND a newer/smarter model.
+- **Real A/B on the peptide problem transcript** (ranking call, measured token usage + cost):
+  - sonnet-4.6 (current): $0.0196, 4 clips, correct boundaries.
+  - sonnet-5 thinking ON (default): **$0.0474, 0 clips** — adaptive thinking burned all 4096 output tokens on reasoning, no JSON. TRAP.
+  - sonnet-5 thinking OFF: **$0.0167, 4 clips**, correct boundaries + split. ~15% cheaper than 4.6 net (its new tokenizer adds ~30% input tokens, still nets cheaper).
+  - haiku-4.5: **$0.0060 (3.3×), 3 clips**, same top picks + correct boundaries, but a real intelligence step-down for hard judgment.
+- **CODE BUG found + fixed (blocked ALL thinking-capable models):** `core/llm.py` + `producer/review_gate.py` did `message.content[0].text`. On thinking-on models content[0] is a ThinkingBlock → AttributeError. New `extract_text()` scans for the first text block. New `create_completion()` disables extended thinking on ranking/segmentation/gate calls (extraction gains nothing from it; on thinking-on-by-default models it wastes the whole max_tokens budget) with a fallback for models that reject the param. All 3 call sites (ranking, vision gate, content gate) route through it. Tests: `tests/test_llm_ranking.py` +6 (extract_text skips thinking block; create_completion disables thinking + fallback). **515 tests pass.**
+- **User chose Sonnet 5.** Set Railway `LLM_MODEL=anthropic/claude-sonnet-5` (was `claude-sonnet-4-6`) + `railway up` (commit `aa28e10`). Verified current model still ranks correctly through the new thinking-off path (no regression). NOTE: Sonnet 5 requires thinking disabled — do NOT remove create_completion's thinking:disabled or ranking will break/overspend.
+- Combined with the earlier same-day cuts (one combined call instead of two + transcript compression), total LLM spend per source is well down while quality is held or improved. Verify on the next live demo run (Sonnet 5 now active in Railway).
