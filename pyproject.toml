@@ -28,6 +28,7 @@ dependencies = [
     "jinja2",
     "boto3",
     "modal",
+    "punctuators",
 ]
 
 [project.optional-dependencies]

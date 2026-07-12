@@ -130,6 +130,11 @@ class Transcript(Base):
     segments: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     # True when word-level timestamps are available
     word_level: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Punctuation-restored sentence spans [{"text","start","end"}] — cached from
+    # core.punctuate.restore_sentences().  NULL = not yet computed or model unavailable;
+    # pipeline falls back to core.sentences.build_sentence_spans() in that case.
+    # Migration: 006_sentence_cache.py
+    sentences: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

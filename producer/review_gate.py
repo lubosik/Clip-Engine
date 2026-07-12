@@ -257,6 +257,7 @@ def _content_llm_call(
     ranking_rules: str,
     next_context: str = "",
     preference_context: str = "",
+    stance: str = "",
 ) -> dict[str, Any]:
     """Score the clip content on the §6c 10-question rubric + §7 safety list.
 
@@ -266,12 +267,17 @@ def _content_llm_call(
                    standalone_value, speaker_engagement, clean_ending,
                    shareability, comprehension, completion_likelihood},
         "safety": {unsafe_diet_content, medical_claims, harmful_content,
-                   guideline_violation}
+                   guideline_violation},
+        "campaign_alignment": {"aligned": bool, "reason": str}   (when stance set)
       }
 
     preference_context: optional learned-preference block (contract §6).
     Injected AFTER the campaign ranking rules and BEFORE the safety check.
     The SAFETY CHECK section itself is never moved or modified.
+
+    stance: campaign stance string (R4).  When non-empty, a CAMPAIGN STANCE
+    section is added and the model must output a campaign_alignment field.
+    Absent campaign_alignment → back-compat PASS.
 
     Raises RuntimeError if LLM_API_KEY / LLM_MODEL are not set.
     """
@@ -310,6 +316,23 @@ text is NOT part of the clip):
     if preference_context and preference_context.strip():
         pref_section = f"\n\n{preference_context.strip()}"
 
+    # Campaign stance section (R4): injected after preferences, before safety.
+    # The model must output campaign_alignment when stance is set.
+    stance_section = ""
+    stance_json_field = ""
+    if stance and stance.strip():
+        stance_section = f"""
+
+CAMPAIGN STANCE (R4 — mandatory check): {stance.strip()}
+Evaluate whether the clip's content ALIGNS with this stance or CONTRADICTS it.
+A clip contradicts the stance when it frames the campaign topic negatively, presents \
+it as inferior to alternatives, or delivers a message inconsistent with the stance."""
+        stance_json_field = """,
+  "campaign_alignment": {{
+    "aligned": true,
+    "reason": "<one line: does the clip align with the campaign stance or contradict it?>"
+  }}"""
+
     prompt = f"""You are a viral short-form content quality analyst.
 
 CLIP HOOK:
@@ -319,7 +342,7 @@ TRANSCRIPT EXCERPT (this is the full spoken content of the clip):
 {transcript_text or '(no transcript)'}
 
 CAMPAIGN RANKING RULES:
-{ranking_rules or 'Default: prefer useful, interesting, standalone moments.'}{next_section}{pref_section}
+{ranking_rules or 'Default: prefer useful, interesting, standalone moments.'}{next_section}{pref_section}{stance_section}
 
 SELF-CONTAINED BOUNDARY CHECK (critical): A good clip is ONE complete idea. It \
 must start on a complete thought and END where that thought RESOLVES — it must NOT \
@@ -371,7 +394,7 @@ Return ONLY this JSON (no prose, no code fences, no markdown):
     "complete_thought": true,
     "ends_on_new_topic": false,
     "reason": "<one line: does the clip start and end on a complete thought, or does it cut off mid-point / bleed into a new topic?>"
-  }}
+  }}{stance_json_field}
 }}"""
 
     from core.llm import create_completion, extract_text
@@ -428,6 +451,137 @@ def _load_style_refs(campaign_name: str) -> list[bytes]:
         except OSError as exc:
             log.warning("Could not read style ref %s: %s", img_path, exc)
     return refs
+
+
+# ── Deterministic blur check ─────────────────────────────────────────────────
+
+# Blur check threshold: Laplacian variance on center band [0.25-0.60 height,
+# 0.1-0.9 width] of the mid-clip gate frame (1080×1920 rendered output).
+#
+# Calibration (2026-07-12, measured on real rendered clips via ffmpeg extraction
+# at t=duration/2, center band LV):
+#   clip52 (defocused t=10-30s):  mid-frame LV= 7.2  → FAIL  ✓
+#   clip55 (defocused t=5-48s):   mid-frame LV=10.2  → FAIL  ✓
+#   clip46 (edge-pinned face, not blur):  LV=17.1    → PASS  ✓
+#   clip53 (anti-peptide stance):         LV= 5.7    → FAIL
+#     Note: clip53 was manually rejected for stance, but its mid-frame IS
+#     defocused at t=31.33s (LV=5.7 < 13). The spec mentions "clip53 t=15-20
+#     passes" (LV≈20 at those timestamps), which is a different window.
+#     The gate correctly flags defocus at the mid-frame; the spec's calibration
+#     guidance used a manual sweep at t=15-20, not the gate frame.
+#   Threshold 13 separates clip55 (max LV=10.2) from clip46 (LV=17.1)
+#   with a clear gap. Recheck if new clip size or encoding changes are made.
+_GATE_BLUR_LAP_THRESHOLD: float = 13.0
+
+# Center band boundaries (fraction of frame height/width)
+_GATE_BLUR_BAND_H_LO: float = 0.25
+_GATE_BLUR_BAND_H_HI: float = 0.60
+_GATE_BLUR_BAND_W_LO: float = 0.10
+_GATE_BLUR_BAND_W_HI: float = 0.90
+
+
+def _check_frames_sharp(frame_bytes: list[bytes]) -> dict[str, Any]:
+    """Deterministic blur check on the mid-clip gate frame.
+
+    Uses Laplacian variance on the center band of the mid-clip frame (index 1
+    in the 4-frame list: hook, mid, near-end, final).  The hook frame (index 0)
+    is excluded because the hook text overlay inflates LV artificially.
+    The near-end/final frames (indices 2, 3) are usually the sharp outro card.
+
+    The mid-clip frame (50% of duration) is the best representative of actual
+    footage quality.
+
+    Args:
+        frame_bytes: list of JPEG bytes from _extract_frames(), length >= 2.
+                     Index 1 = mid-clip frame is used.
+
+    Returns:
+        reason dict: {phase, check, pass, reason}
+        pass=None when cv2 is unavailable (graceful degradation).
+
+    Calibration comment: see _GATE_BLUR_LAP_THRESHOLD above.
+    """
+    # Graceful cv2 import failure → skip check (pass=None like captions_match_speech)
+    try:
+        import cv2 as _cv2
+        import numpy as _np
+    except ImportError:
+        log.debug("_check_frames_sharp: cv2 not available; skipping blur check")
+        return {
+            "phase": "1",
+            "check": "footage_sharp",
+            "pass": None,
+            "reason": "Blur check skipped: cv2 not available",
+        }
+
+    # Need at least the mid frame (index 1)
+    if len(frame_bytes) < 2 or not frame_bytes[1]:
+        return {
+            "phase": "1",
+            "check": "footage_sharp",
+            "pass": None,
+            "reason": "Blur check skipped: mid-clip frame not available",
+        }
+
+    mid_bytes = frame_bytes[1]
+
+    try:
+        arr = _np.frombuffer(mid_bytes, dtype=_np.uint8)
+        frame = _cv2.imdecode(arr, _cv2.IMREAD_COLOR)
+        if frame is None:
+            return {
+                "phase": "1",
+                "check": "footage_sharp",
+                "pass": None,
+                "reason": "Blur check skipped: mid-clip frame could not be decoded",
+            }
+
+        h, w = frame.shape[:2]
+        y0 = int(h * _GATE_BLUR_BAND_H_LO)
+        y1 = int(h * _GATE_BLUR_BAND_H_HI)
+        x0 = int(w * _GATE_BLUR_BAND_W_LO)
+        x1 = int(w * _GATE_BLUR_BAND_W_HI)
+
+        if y1 <= y0 or x1 <= x0:
+            return {
+                "phase": "1",
+                "check": "footage_sharp",
+                "pass": None,
+                "reason": f"Blur check skipped: center band too small ({w}x{h})",
+            }
+
+        roi = frame[y0:y1, x0:x1]
+        gray = _cv2.cvtColor(roi, _cv2.COLOR_BGR2GRAY)
+        lv = float(_cv2.Laplacian(gray, _cv2.CV_64F).var())
+        passed = lv >= _GATE_BLUR_LAP_THRESHOLD
+
+        reason = (
+            f"footage_sharp: mid-clip center-band Laplacian variance={lv:.1f} "
+            f"(threshold={_GATE_BLUR_LAP_THRESHOLD:.0f}) → "
+            + ("PASS" if passed else "FAIL — footage appears defocused")
+        )
+        if not passed:
+            reason = (
+                f"Defocused footage detected: mid-clip Laplacian variance={lv:.1f} "
+                f"< threshold {_GATE_BLUR_LAP_THRESHOLD:.0f}. "
+                "Source footage is out of focus at the clip midpoint."
+            )
+
+        return {
+            "phase": "1",
+            "check": "footage_sharp",
+            "pass": passed,
+            "reason": reason,
+        }
+
+    except Exception as exc:
+        log.warning("_check_frames_sharp: error computing blur metric: %s", exc)
+        return {
+            "phase": "1",
+            "check": "footage_sharp",
+            "pass": None,
+            "reason": f"Blur check skipped: {exc}",
+        }
 
 
 # ── Video resolution / duration helpers ──────────────────────────────────────
@@ -593,6 +747,10 @@ def _score_content_verdict(
     relaxed_safety_checks: safety keys (from campaign gate config) that are
     recorded but do NOT auto-fail the clip — the flag is kept in the reason
     string so the human reviewer still sees it.
+
+    campaign_alignment (R4): when present and aligned=false, this is a HARD
+    didnt_pass — NOT part of the safety list, NOT relaxable via
+    relaxed_safety_checks.  Absent field → back-compat PASS.
     """
     reasons: list[dict[str, Any]] = []
 
@@ -670,15 +828,41 @@ def _score_content_verdict(
             ),
         })
 
+    # ── Campaign alignment check (R4) ─────────────────────────────────────
+    # HARD didnt_pass when campaign_alignment.aligned is explicitly False.
+    # NOT relaxable via relaxed_safety_checks; NOT part of the safety list.
+    # Absent field → PASS for backwards compatibility with mocked tests.
+    alignment_fail = False
+    ca_raw = verdict.get("campaign_alignment")
+    if isinstance(ca_raw, dict):
+        ca_aligned = bool(ca_raw.get("aligned", True))
+        ca_reason = str(ca_raw.get("reason") or "").strip()
+        if not ca_aligned:
+            alignment_fail = True
+            ca_reason_text = "CAMPAIGN ALIGNMENT FAIL: " + (
+                ca_reason or "clip framing contradicts the campaign stance"
+            )
+        else:
+            ca_reason_text = "Campaign alignment OK: " + (
+                ca_reason or "clip aligns with campaign stance"
+            )
+        reasons.append({
+            "phase": "2",
+            "check": "campaign_alignment",
+            "pass": ca_aligned,
+            "reason": ca_reason_text,
+        })
+
     # ── Threshold check ──────────────────────────────────────────────────
     score_ok = formula_score >= FORMULA_SCORE_THRESHOLD
+    overall_pass = score_ok and not any_safety_fail and not alignment_fail
     reasons.append({
         "phase": "2",
         "check": "formula_score_threshold",
-        "pass": score_ok and not any_safety_fail,
+        "pass": overall_pass,
         "reason": (
             f"formula_score={formula_score:.3f} (threshold {FORMULA_SCORE_THRESHOLD}) "
-            + ("PASS" if score_ok and not any_safety_fail else "FAIL")
+            + ("PASS" if overall_pass else "FAIL")
         ),
     })
 
@@ -930,6 +1114,21 @@ def _run_phase1(
 
         frames = _extract_frames(local_path, timestamps)
 
+        # ── Deterministic blur check (no LLM, no network) ────────────────
+        # Must run while frames are still in scope (before the tempdir exits).
+        # This check is self-contained: cv2 import failure → pass=None (skip).
+        # A failed blur check (pass=False) is an immediate Phase 1 auto-fail
+        # and short-circuits the vision call (saves LLM cost).
+        blur_reason = _check_frames_sharp(frames)
+        reasons.append(blur_reason)
+        if blur_reason.get("pass") is False:
+            log.info(
+                "Phase 1 blur auto-fail for clip %s: %s",
+                getattr(clip_row, "id", "?"),
+                blur_reason["reason"],
+            )
+            return reasons, False, probe
+
     # ── Vision LLM call ───────────────────────────────────────────────────
     style_refs = _load_style_refs(campaign_name)
     vision_verdict = _vision_llm_call(frames, style_refs, duration)
@@ -938,7 +1137,8 @@ def _run_phase1(
 
     # Determine pass/fail: all checks must pass
     # animation_detected=True is always auto-fail (handled in vision_reasons)
-    phase_passed = all(r["pass"] for r in reasons)
+    # blur check pass=None (cv2 unavailable) does not block the phase
+    phase_passed = all(r["pass"] is True or r["pass"] is None for r in reasons)
 
     return reasons, phase_passed, probe
 
@@ -980,9 +1180,17 @@ def _run_phase2(
     except Exception:
         pass
 
+    # Campaign stance (R4): used in the content LLM prompt and for alignment check.
+    stance = ""
+    try:
+        stance = str(campaign_cfg.ranking.stance or "")
+    except Exception:
+        pass
+
     verdict = _content_llm_call(
         hook, transcript_text, ranking_rules, next_context,
         preference_context=preference_context,
+        stance=stance,
     )
     formula_score, content_reasons = _score_content_verdict(
         verdict, relaxed_safety_checks=relaxed_checks
@@ -999,10 +1207,15 @@ def _run_phase2(
         not r["pass"] and r["check"] == "self_contained"
         for r in content_reasons
     )
+    # campaign_alignment is a HARD fail — not relaxable (R4)
+    alignment_fail = any(
+        not r["pass"] and r["check"] == "campaign_alignment"
+        for r in content_reasons
+    )
     score_fail = formula_score < FORMULA_SCORE_THRESHOLD
     gate_status = (
         "ready"
-        if (not safety_fail and not score_fail and not boundary_fail)
+        if (not safety_fail and not score_fail and not boundary_fail and not alignment_fail)
         else "didnt_pass"
     )
 

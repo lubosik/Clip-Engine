@@ -137,9 +137,22 @@ image = (
         # so missing libs never crash the render.
         "nvidia-cublas-cu12",
         "nvidia-cudnn-cu12",
+        # LR-ASD dependencies (spec R1.4) — torch already pulled by mediapipe;
+        # torchaudio/scipy/python_speech_features needed when REFRAME_ASD=1.
+        # LR-ASD weights (Junhua-Liao/LR-ASD AVA model, ~4 MB) and the repo
+        # code are NOT auto-fetched yet — this is the activation point:
+        #   1. Add a .run_commands() step below to clone the repo at a pinned
+        #      commit SHA and download weights to /models/lrasd/.
+        #   2. Set REFRAME_ASD=1 in the Modal secret clip-engine.
+        #   3. Implement the inference stub in render/asd.py.
+        # Fallback chain is always active so disabling REFRAME_ASD never
+        # breaks existing renders.
+        "torchaudio",
+        "scipy",
+        "python_speech_features",
     )
-    # Include render/reframe.py in the container so modal_app can import it.
-    # copy=True bakes the file into the image layer at deploy time.
+    # Include the full render/ package (reframe.py + asd.py) in the container.
+    # copy=True bakes the files into the image layer at deploy time.
     .add_local_python_source("render", copy=True)
     # Ship the YuNet face-detection model. add_local_python_source only bakes
     # the *.py of the render package — the ONNX model lives under assets/ and

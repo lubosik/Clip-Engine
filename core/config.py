@@ -97,6 +97,12 @@ class RankingConfig(BaseModel):
         "Each clip must stand alone. EXCLUDE: unsafe advice, harmful content, "
         "anything that violates platform community guidelines."
     )
+    # Campaign stance (R4): free-text framing rule applied at ranking and gate.
+    # Empty string = no stance enforcement (default — safe for all existing campaigns).
+    # Example: "pro-peptide: content must present peptides positively or
+    # neutrally-curious; never framing peptides as inferior, disappointing, or
+    # beaten by alternatives"
+    stance: str = ""
 
     @field_validator("clip_length")
     @classmethod

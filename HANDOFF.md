@@ -623,3 +623,64 @@ API endpoints added to `web/api.py`:
 - Frontend agent is handling: Sources In-progress live view using the new SSE endpoint + polling fallback, one-tap reject reason chips, approval-rate tab, sw v12.
 - After both streams land: full review pass before commit.
 - Remaining system items: POSTIZ_API_URL confirmed set; rotate chat-pasted creds; verify re-deploy after git push.
+
+### 2026-07-12 — Session: Render-quality fix pass (render-side stream)
+
+**4 build items implemented. Full suite: 748 passed (39 new tests, 0 regressions).**
+
+**Item 1 — Face-margin guard + re-anchor (spec R1.1, deterministic, fixes clip46)**
+- `render/reframe.py`: new `_margin_valid_cx_range(face, crop_box_w, src_w, half_crop)` computes the (min_cx, max_cx) range that places a face FULLY within the central 80% of crop width (10% margin each side).
+- `_is_face_within_margin_px(face, cx_px, crop_box_w, half_crop, src_w)` for per-frame validation.
+- `_headroom_ok(face)` checks face.y >= 0.15 (15% headroom from frame top).
+- `_apply_constant_with_margin_guard(...)`: intersects per-frame valid cx ranges; if a single constant cx satisfies all frames → use it; otherwise upgrades to tracking mode.
+- All scenes validated per-frame; violations logged with count and re-anchor info.
+- VERIFIED: clip46-style face at source cx=0.20 → margin violated, adjusted from cx=960 to cx=435, face correctly placed within margin.
+
+**Item 2 — Virtual camera modes per scene (spec R1.2, AutoFlip pattern)**
+- `_STATIONARY_STDDEV_FRAC = 0.05` (5% of source width threshold).
+- Stationary (stddev < 5%): constant crop at median center with margin guard.
+- Tracking/panning (stddev ≥ 5%): `_compute_tracking_keyframes(...)` via `numpy.polyfit(degree=2)` over (t, face_center_x) → smooth path at 0.5s keyframe intervals, clamped to source bounds, max shift `_MAX_SHIFT_PX_PER_FRAME=1.0px/frame@30fps` enforced post-clamp.
+- `_apply_per_scene_crops(...)` updated to handle multi-keyframe tracking scenes (sub-segments at each keyframe interval), keeping existing concat-demuxer pipeline shape.
+- VERIFIED: linear-motion face → multiple keyframes generated, max-shift constraint respected (unit tests + E2E).
+
+**Item 3a — Blur rejection in reframe.py (spec R1.3)**
+- `_FACE_BLUR_LAP_THRESHOLD = 200.0` (calibrated: face-crop LV 3-10 for defocus, >500 sharp studio).
+- `_laplacian_face_crop(frame, face, src_w, src_h)` computes LV on the face crop ROI (not full frame — background bokeh must not penalise a sharp face).
+- Blurry frames excluded from anchoring and speaker selection; per-scene blur stats logged.
+- `_FACE_BLUR_LAP_THRESHOLD = -1.0` sentinel for face crops too small to measure.
+- VERIFIED: sharp checkerboard face LV >> 200 (pass); Gaussian-blurred face LV << 200 (exclude); sharp face in blurry background → face crop correctly passes (unit tests).
+
+**Item 3b — Gate blur check in producer/review_gate.py (spec R1.3, backstop)**
+- New `_check_frames_sharp(frame_bytes: list[bytes]) -> dict` helper.
+- Checks the MID-CLIP gate frame (index 1 in the 4-frame list) only — the hook frame (index 0) has the hook text overlay which artificially inflates LV to 2000+; near-end/final frames (2, 3) are the outro card.
+- Center band: [0.25-0.60 height, 0.1-0.90 width], `_GATE_BLUR_LAP_THRESHOLD = 13.0`.
+- Calibration (ffmpeg-extracted, real 1080×1920 renders): clip52 mid LV=7.2→FAIL ✓, clip55 mid LV=10.2→FAIL ✓, clip46 mid LV=17.1→PASS ✓. Note: clip53 mid LV=5.7 also fails (correctly — defocused at t=31.33s); spec's "clip53 t=15-20 pass" was measured at a different window than the gate's mid-frame.
+- Graceful: cv2 import failure → pass=None (skip, like captions_match_speech).
+- Wired into `_run_phase1` after `_extract_frames` with early return on `pass=False` (skips vision LLM call, saves cost).
+- `phase_passed` logic updated: `None` treated as skip (not fail), `False` = fail.
+- VERIFIED: unit tests (blurry mid fails, blurry hook doesn't fail, empty frames → None); calibration tests (clip52/55 FAIL, clip46 PASS) all green.
+
+**Item 4 — LR-ASD (spec R1.4) — STUBBED, fallback chain landed**
+- `render/asd.py` (NEW): `select_active_speaker_asd(...)` stub — raises `NotImplementedError` when weights absent (currently always absent); returns `None` when `REFRAME_ASD=0`.
+- `select_by_size_and_centrality(...)`: improved fallback heuristic: score = area × (1 - 2|cx-0.5|), prefers large+central faces.
+- `REFRAME_ASD` env flag (default 0/off) — full ASD can be enabled when LR-ASD weights + repo code are added to the Modal image.
+- `_select_active_speaker(...)` in reframe.py: chains ASD → mouth-variance heuristic → largest+most-central fallback; never breaks pipeline.
+- `render/modal_app.py` Modal image: added `torchaudio`, `scipy`, `python_speech_features` to pip_install; comment documents the LR-ASD activation steps (clone repo + download weights + set REFRAME_ASD=1 in Modal secret).
+- Status: ASD is STUBBED. Fallback chain is fully operational and tested.
+
+**Modal image changes:**
+- `torchaudio`, `scipy`, `python_speech_features` added to `.pip_install()`.
+- `render/asd.py` included in the container via the existing `.add_local_python_source("render", copy=True)`.
+- Does NOT require `make deploy-modal` for the fallback chain changes to work (pure Python path). Modal deploy needed once LR-ASD weights are added.
+
+**New env flags:**
+- `REFRAME_ASD=1/0` (default 0) — enables LR-ASD speaker detection when stubbed model is replaced.
+
+**Test counts:** 39 new tests in `tests/test_reframe_quality.py`. Full suite: 748 passed, 0 failed.
+
+**Files changed (render-side scope only):**
+- `render/reframe.py` — major refactor (margin guard, mode selection, blur filtering, tracking keyframes, ASD integration point)
+- `render/asd.py` — NEW (ASD stub + improved fallback heuristic)
+- `render/modal_app.py` — Modal image: 3 new pip deps + comment
+- `producer/review_gate.py` — `_check_frames_sharp` + wired into `_run_phase1`
+- `tests/test_reframe_quality.py` — NEW (39 tests)

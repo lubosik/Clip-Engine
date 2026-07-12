@@ -169,6 +169,7 @@ def rank_clips(
     comment_summary: str | None,
     cfg: "RankingConfig",
     preference_context: str = "",
+    sentence_spans: list[dict] | None = None,
 ) -> list[dict]:
     """
     Call the LLM to rank transcript moments.
@@ -180,6 +181,10 @@ def rank_clips(
         preference_context:  optional learned-preference block injected into the
                              ranking prompt (from core.preferences.build_preference_context).
                              Pass "" to omit (default — backwards-compatible).
+        sentence_spans:      optional punctuation-restored sentence spans (§R2.2).
+                             When provided, the ranking prompt uses numbered sentences
+                             and §R2.3 speaker-turn prefilters are applied to all
+                             candidates before returning.
 
     Returns:
         LLM-ranked candidates [{start, end, score, hook, reason}]
@@ -187,11 +192,24 @@ def rank_clips(
     """
     from core.llm import rank_moments  # lazy import guards against missing anthropic SDK
 
-    return rank_moments(
+    stance = getattr(cfg, "stance", "") or ""
+
+    candidates = rank_moments(
         transcript=transcript,
         rules=cfg.ranking_rules,
         comment_summary=comment_summary,
         clip_len=(cfg.clip_length[0], cfg.clip_length[1]),
         max_clips=cfg.max_clips_per_source,
         preference_context=preference_context,
+        sentence_spans=sentence_spans,
+        stance=stance,
     )
+
+    # §R2.3 speaker-turn prefilters — applied when sentence spans are available.
+    if sentence_spans and candidates:
+        from producer.boundary_check import apply_prefilters
+        clip_len = (cfg.clip_length[0], cfg.clip_length[1])
+        candidates = [apply_prefilters(c, sentence_spans, clip_len) for c in candidates]
+        log.debug("Prefilters applied to %d candidates", len(candidates))
+
+    return candidates

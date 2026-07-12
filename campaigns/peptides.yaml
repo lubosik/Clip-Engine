@@ -69,6 +69,7 @@ ranking:
   max_clips_per_source: 8
   exhaust_source: true          # reuse the same podcast across runs, new moments only
   min_score: 0.62
+  stance: "pro-peptide: content must present peptides positively or neutrally-curious; never framing peptides as inferior, disappointing, or beaten by alternatives"
   ranking_rules: |
     You are selecting short-form clips for VICI PEPTIDES. Optimise for
     scroll-stopping, conversion, and topical fit. Pick moments that stand

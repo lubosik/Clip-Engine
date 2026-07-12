@@ -100,6 +100,52 @@ def _sentence_char_spans(text: str) -> list[tuple[int, int]]:
 # Main public function 1 — build sentence spans with timestamps
 # ---------------------------------------------------------------------------
 
+def _build_char_time_map(
+    transcript: list[dict],
+) -> tuple[str, list[float]]:
+    """
+    Build a character-level timestamp map from a segment-level transcript.
+
+    Returns ``(full_text, char_times)`` where ``char_times[i]`` is the
+    interpolated timestamp for ``full_text[i]``.  Both lists have the same
+    length.  Returns ``("", [])`` for an empty or whitespace-only transcript.
+
+    Used by both :func:`build_sentence_spans` and
+    :func:`core.punctuate.restore_sentences` to avoid duplicating the
+    interpolation logic.
+    """
+    chars: list[str] = []
+    char_times: list[float] = []
+    prev_seg_end: float = 0.0
+
+    for seg in transcript:
+        seg_text: str = (seg.get("text") or "").strip()
+        seg_start: float = float(seg["start"])
+        seg_end: float = float(seg["end"])
+        n: int = len(seg_text)
+
+        if n == 0:
+            prev_seg_end = seg_end
+            continue
+
+        if chars:
+            chars.append(" ")
+            char_times.append((prev_seg_end + seg_start) / 2.0)
+
+        duration: float = seg_end - seg_start
+        for j, ch in enumerate(seg_text):
+            t = seg_start + (j / max(n - 1, 1)) * duration
+            chars.append(ch)
+            char_times.append(t)
+
+        prev_seg_end = seg_end
+
+    full_text: str = "".join(chars)
+    if not full_text.strip():
+        return "", []
+    return full_text, char_times
+
+
 def build_sentence_spans(transcript: list[dict]) -> list[dict]:
     """
     Convert a segment-level transcript into sentence-level time spans.
@@ -123,41 +169,10 @@ def build_sentence_spans(transcript: list[dict]) -> list[dict]:
 
     # ------------------------------------------------------------------
     # Step 1: build parallel (character, timestamp) lists for the full
-    #         concatenated text.  Segments are joined with a single space;
-    #         the space gets the midpoint time of the inter-segment gap.
+    #         concatenated text using the shared helper.
     # ------------------------------------------------------------------
-    chars: list[str] = []
-    char_times: list[float] = []
-    prev_seg_end: float = 0.0
-
-    for seg in transcript:
-        seg_text: str = (seg.get("text") or "").strip()
-        seg_start: float = float(seg["start"])
-        seg_end: float = float(seg["end"])
-        n: int = len(seg_text)
-
-        if n == 0:
-            # Empty segment: advance timing reference, skip char emission.
-            prev_seg_end = seg_end
-            continue
-
-        # Space separator between non-empty segments.
-        if chars:
-            chars.append(" ")
-            char_times.append((prev_seg_end + seg_start) / 2.0)
-
-        # Linear interpolation within this segment.
-        # char j → seg_start + j / (n-1) * duration   (n=1 → all at seg_start)
-        duration: float = seg_end - seg_start
-        for j, ch in enumerate(seg_text):
-            t = seg_start + (j / max(n - 1, 1)) * duration
-            chars.append(ch)
-            char_times.append(t)
-
-        prev_seg_end = seg_end
-
-    full_text: str = "".join(chars)
-    if not full_text.strip():
+    full_text, char_times = _build_char_time_map(transcript)
+    if not full_text:
         return []
 
     # ------------------------------------------------------------------

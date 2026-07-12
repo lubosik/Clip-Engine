@@ -152,23 +152,57 @@ def _parse_ranking_response(text: str) -> tuple[list, list]:
     return [], []
 
 
-def _validate_moments(raw: list[Any], clip_len: tuple[int, int]) -> list[dict]:
+def _validate_moments(
+    raw: list[Any],
+    clip_len: tuple[int, int],
+    sentence_spans: list[dict] | None = None,
+) -> list[dict]:
     """
     Validate and normalise raw LLM output items.
+
+    Supports two output shapes from the model:
+
+    1. Sentence-index mode (new, when sentence_spans is provided):
+       The LLM returns ``{"start_sentence": int, "end_sentence": int, ...}``.
+       Indices are clamped to the spans list, then converted to float
+       start/end timestamps before returning.
+
+    2. Float-time mode (legacy / backwards-compat fallback):
+       The LLM returns ``{"start": float, "end": float, ...}``.
+       Handled exactly as before — no behaviour change.
+
     Returns only items with required fields and plausible values.
     """
     validated = []
     min_len, max_len = clip_len
+    n_spans = len(sentence_spans) if sentence_spans else 0
+
     for item in raw:
         if not isinstance(item, dict):
             log.warning("Skipping non-dict moment item", extra={"item": item})
             continue
         try:
-            start = float(item["start"])
-            end = float(item["end"])
+            # ── Resolve start / end from sentence indices or float times ───
+            if (
+                sentence_spans
+                and "start_sentence" in item
+                and "end_sentence" in item
+            ):
+                si = int(item["start_sentence"])
+                ei = int(item["end_sentence"])
+                # Clamp to valid span range
+                si = max(0, min(si, n_spans - 1))
+                ei = max(si, min(ei, n_spans - 1))
+                start = float(sentence_spans[si]["start"])
+                end = float(sentence_spans[ei]["end"])
+            else:
+                start = float(item["start"])
+                end = float(item["end"])
+
             score = float(item["score"])
             hook = str(item.get("hook") or "")
             reason = str(item.get("reason") or "")
+
             # Enforce HOOK_CAPITALISATION.md mechanically: strip em dashes,
             # cap the strategic-caps budget, demote connectives/all-caps lines.
             if hook:
@@ -221,6 +255,8 @@ def _build_prompt(
     clip_len: tuple[int, int],
     max_clips: int,
     preference_context: str = "",
+    sentence_spans: list[dict] | None = None,
+    stance: str = "",
 ) -> str:
     """Build the combined segmentation + ranking prompt.
 
@@ -230,11 +266,16 @@ def _build_prompt(
 
     preference_context: optional learned-preference block injected AFTER the
     campaign ranking rules and BEFORE the sentence-boundary rules.
-    """
-    seg_lines = "\n".join(
-        f"[{seg['start']:.1f}s-{seg['end']:.1f}s] {seg['text']}" for seg in transcript
-    )
 
+    sentence_spans: when provided (punctuation-restored spans), the prompt
+    presents NUMBERED sentences and asks for sentence-index selection instead of
+    raw float times.  When absent the prompt and output format are unchanged
+    (regression-critical).
+
+    stance: campaign stance string (R4).  When non-empty, a MANDATORY STANCE RULE
+    block is injected after the campaign rules instructing the model to score 0 /
+    exclude moments that contradict the stance.
+    """
     comment_section = ""
     if comment_summary:
         comment_section = f"\n\nCOMMENT SIGNAL (top recurring themes from audience):\n{comment_summary}"
@@ -244,10 +285,104 @@ def _build_prompt(
     if preference_context and preference_context.strip():
         pref_section = f"\n\n{preference_context.strip()}"
 
+    # Stance block (R4): injected after campaign rules and before preferences.
+    stance_section = ""
+    if stance and stance.strip():
+        stance_section = (
+            f"\n\nMANDATORY STANCE RULE (R4 — enforce before all other criteria): "
+            f"{stance.strip()} "
+            "Any moment whose framing contradicts this stance MUST be scored 0 and "
+            "excluded from clips — do NOT include such moments even if they are "
+            "otherwise high-quality."
+        )
+
+    if sentence_spans:
+        # ── Sentence-INDEX mode (Spotify pattern, §R2.2) ─────────────────────
+        # Present numbered sentences with timestamps; ask for index-based selection.
+        span_lines = "\n".join(
+            f"[{i}] [{span['start']:.1f}s-{span['end']:.1f}s] {span['text']}"
+            for i, span in enumerate(sentence_spans)
+        )
+        n_spans = len(sentence_spans)
+
+        return f"""You are a clip ranking assistant. Analyse the numbered sentence list below and identify the best moments to cut as short-form clips.
+
+CAMPAIGN RANKING RULES:
+{rules.strip()}{stance_section}
+
+CLIP LENGTH CONSTRAINTS: minimum {clip_len[0]}s, maximum {clip_len[1]}s
+MAXIMUM CLIPS TO RETURN: {max_clips}{comment_section}{pref_section}
+
+SENTENCE-BOUNDARY RULE (mandatory): Every clip must start at the FIRST word of a \
+sentence and end at the LAST word of a sentence — use the sentence INDEX numbers \
+shown below. The clip must be a complete, coherent thought. The hook must describe \
+the point made in the opening sentence.
+
+HOOK STYLE RULES (mandatory — the hook is burned on screen over the first \
+seconds of the clip; a viewer decides to stay or scroll off these words):
+- Sentence case baseline. Then put EXACTLY ONE (at most two, if the hook is \
+long) high-impact word in FULL UPPERCASE so the eye stops on it: the action \
+verb, the outcome word, or the emotional pivot (NEVER, STOP, WRONG, BANNED, \
+NOBODY, ILLEGAL). Example: "The FDA quietly BANNED the most effective peptides".
+- The capitalised word(s) must survive the strip test: reading ONLY the \
+uppercase words must still communicate the promise of the clip.
+- NEVER capitalise two adjacent words. NEVER capitalise the first word unless \
+it is a contrarian opener (STOP / NEVER). NEVER capitalise connective words \
+(the, a, you, is, to...), brand names, or numbers. Acronyms (FDA, TRT, GLP-1, \
+BPC-157) keep their normal casing and do not count as your capitalised word.
+- Keep capitalised words under 20 percent of the hook. One strong cap beats \
+two weak ones.
+- ABSOLUTE RULE: never use an em dash or en dash (— or –) anywhere in the \
+hook. Use a full stop or a comma instead.
+- The hook must read like a person talking, not a billboard.
+
+TOPIC-BOUNDARY RULE (mandatory): One clip = one complete idea. Start where a \
+self-contained thought begins and END where that thought RESOLVES — right before \
+a topic change, a new question from the host, or the speaker moving to a different \
+subject. NEVER end a clip on the first sentence of a new topic. Topic completeness \
+wins over hitting a target length.
+
+{FEWSHOT_BOUNDARY_EXAMPLES}
+
+NUMBERED SENTENCES (index [i] with timestamps):
+{span_lines}
+
+FIRST split the sentences into self-contained topic segments. THEN select the best \
+clips by referencing sentence indices only — do NOT invent float timestamps.
+
+Return ONLY this JSON object (no prose, no code fences), best clips first:
+{{
+  "topics": [
+    {{
+      "start": <float seconds — first word of the topic>,
+      "end": <float seconds — last word of the resolving thought>,
+      "summary": "<one line: what this topic is about>",
+      "ends_because": "<host asks new question / subject change / wrap-up cue / story resolves>"
+    }}
+  ],
+  "clips": [
+    {{
+      "start_sentence": <int — index of the first sentence of this clip (0 to {n_spans - 1})>,
+      "end_sentence": <int — index of the last sentence of this clip (0 to {n_spans - 1})>,
+      "score": <float 0.0-1.0>,
+      "hook": "<one compelling sentence summarising the opening sentence of this clip>",
+      "reason": "<brief explanation why this moment is strong>"
+    }}
+  ]
+}}
+
+If no moments meet the criteria, return {{"topics": [], "clips": []}}.
+"""
+
+    # ── Legacy float-time mode (no sentence spans — unchanged behaviour) ──────
+    seg_lines = "\n".join(
+        f"[{seg['start']:.1f}s-{seg['end']:.1f}s] {seg['text']}" for seg in transcript
+    )
+
     return f"""You are a clip ranking assistant. Analyse the transcript below and identify the best moments to cut as short-form clips.
 
 CAMPAIGN RANKING RULES:
-{rules.strip()}
+{rules.strip()}{stance_section}
 
 CLIP LENGTH CONSTRAINTS: minimum {clip_len[0]}s, maximum {clip_len[1]}s
 MAXIMUM CLIPS TO RETURN: {max_clips}{comment_section}{pref_section}
@@ -325,6 +460,8 @@ def rank_moments(
     clip_len: tuple[int, int],
     max_clips: int,
     preference_context: str = "",
+    sentence_spans: list[dict] | None = None,
+    stance: str = "",
 ) -> list[dict]:
     """
     Call the LLM to rank transcript moments.
@@ -338,6 +475,15 @@ def rank_moments(
         preference_context:  optional learned-preference block (contract §6).
                              Injected into the prompt after ranking rules and before
                              sentence-boundary rules.  Pass "" to omit (default).
+        sentence_spans:      optional punctuation-restored sentence spans from
+                             core.punctuate.restore_sentences().  When provided,
+                             the prompt uses NUMBERED sentences and requires
+                             start_sentence/end_sentence indices from the model
+                             (§R2.2 Spotify pattern).  When absent the prompt and
+                             parsing behave exactly as today (regression-critical).
+        stance:              campaign stance string (R4).  When non-empty, a
+                             MANDATORY STANCE RULE block is injected instructing
+                             the model to score 0 / exclude contradicting moments.
 
     Returns:
         [{start, end, score, hook, reason}] — validated, length-filtered.
@@ -372,6 +518,9 @@ def rank_moments(
     # Compress the transcript for the prompt only (merge 2-4s fragments into
     # ~12s chunks) — big input-token saving on long podcasts. Boundary snapping
     # below still uses the full-resolution `transcript`, so precision is intact.
+    # When sentence_spans are provided, the prompt uses those instead (already
+    # compressed to sentence granularity), so we compress but do not use the
+    # compressed transcript in the sentence-index branch.
     prompt_transcript = _compress_transcript(transcript)
 
     # ONE combined call does segmentation + ranking (topics + clips together),
@@ -379,6 +528,8 @@ def rank_moments(
     prompt = _build_prompt(
         prompt_transcript, rules, comment_summary, clip_len, max_clips,
         preference_context=preference_context,
+        sentence_spans=sentence_spans,
+        stance=stance,
     )
 
     def _call() -> str:
@@ -412,7 +563,7 @@ def rank_moments(
     if topic_segments:
         log.info("Ranking response included %d topic segments", len(topic_segments))
 
-    validated = _validate_moments(moments_raw, clip_len)
+    validated = _validate_moments(moments_raw, clip_len, sentence_spans=sentence_spans)
 
     # ------------------------------------------------------------------
     # Snap every moment's start/end to whole-sentence boundaries so that
@@ -421,14 +572,18 @@ def rank_moments(
     # raw validated timestamps are used unchanged.
     # ------------------------------------------------------------------
     try:
-        sentence_spans = build_sentence_spans(transcript)
-        if sentence_spans:
+        # In sentence-index mode the moments are ALREADY aligned to the
+        # punctuation-restored spans — snap with those SAME spans (a safe
+        # no-op guard), never the regex-derived ones, or the two different
+        # segmentations fight and shift correct boundaries by 0.5-2s.
+        snap_spans = sentence_spans if sentence_spans else build_sentence_spans(transcript)
+        if snap_spans:
             snapped: list[dict] = []
             for moment in validated:
                 new_start, new_end = snap_to_sentences(
                     moment["start"],
                     moment["end"],
-                    sentence_spans,
+                    snap_spans,
                     clip_len,
                 )
                 # Topic-boundary guard: if the (sentence-snapped) end has bled
@@ -438,7 +593,7 @@ def rank_moments(
                     new_start,
                     new_end,
                     topic_segments,
-                    sentence_spans,
+                    snap_spans,
                     clip_len,
                 )
                 snapped.append({**moment, "start": new_start, "end": new_end})
@@ -446,7 +601,7 @@ def rank_moments(
             log.debug(
                 "Sentence + topic boundary snapping applied",
                 extra={
-                    "span_count": len(sentence_spans),
+                    "span_count": len(snap_spans),
                     "topic_count": len(topic_segments),
                     "moment_count": len(validated),
                 },

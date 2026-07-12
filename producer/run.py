@@ -204,6 +204,42 @@ def _process_source(
             session.commit()
             return []
 
+        # ── Punctuation-restored sentence spans (§R2.1 + §R2.2 + §R2.3) ──────
+        # Computed once per source, cached in Transcript.sentences so later runs
+        # skip the ~60-90s CPU inference.  None → pipeline falls back to the
+        # regex path (build_sentence_spans) inside rank_moments.
+        sentence_spans: list[dict] | None = None
+        try:
+            from core.models import Transcript as _TranscriptForSpans
+            from core.punctuate import restore_sentences as _restore_sentences
+
+            tr_row = session.query(_TranscriptForSpans).filter_by(source_id=source_id).first()
+            if tr_row is not None:
+                if tr_row.sentences is not None:
+                    # Use cached value
+                    sentence_spans = tr_row.sentences
+                    log.info(
+                        "Using cached sentence spans (%d spans) for source %s",
+                        len(sentence_spans), source_id,
+                    )
+                else:
+                    # Compute and cache
+                    sentence_spans = _restore_sentences(segments)
+                    if sentence_spans is not None:
+                        tr_row.sentences = sentence_spans
+                        session.commit()
+                        log.info(
+                            "Sentence spans computed and cached (%d spans) for source %s",
+                            len(sentence_spans), source_id,
+                        )
+        except Exception as span_exc:
+            log.warning(
+                "Sentence span computation failed (non-fatal); using regex fallback: %s",
+                span_exc,
+                extra={"source_id": source_id},
+            )
+            sentence_spans = None
+
         # Stage 5: rank → select
         # Set 'identifying' BEFORE ranking (cost guard probe runs first for YouTube)
         set_source_stage(session, source_id, "identifying")
@@ -229,6 +265,7 @@ def _process_source(
         candidates = rank_clips(
             segments, comment_summary, campaign_cfg.ranking,
             preference_context=preference_context,
+            sentence_spans=sentence_spans,
         )
         selected = select_clips(candidates, used_ranges, campaign_cfg.ranking)
 
@@ -265,6 +302,58 @@ def _process_source(
         mark_source_status(session, source_id, "selected")
         set_source_stage(session, source_id, "rendering", clips_identified=len(selected))
         session.commit()
+
+        # ── §R2.4 Pre-render boundary verification ───────────────────────────────
+        # For each selected clip, run a cheap LLM boundary check BEFORE downloading
+        # and rendering (saves GPU spend when boundaries are bad).
+        # Drops clips that still fail after one adjustment round.
+        if sentence_spans:
+            from producer.boundary_check import verify_boundaries
+            pre_render: list[dict] = []
+            for clip_candidate in selected:
+                try:
+                    adjusted, keep = verify_boundaries(
+                        clip_candidate,
+                        sentence_spans,
+                        clip_len=(
+                            campaign_cfg.ranking.clip_length[0],
+                            campaign_cfg.ranking.clip_length[1],
+                        ),
+                    )
+                    if keep:
+                        pre_render.append(adjusted)
+                    else:
+                        log.info(
+                            "Boundary verify DROP: source=%s start=%.2f end=%.2f",
+                            source_id,
+                            clip_candidate.get("start", 0),
+                            clip_candidate.get("end", 0),
+                        )
+                except Exception as bv_exc:
+                    # Never block on verifier errors
+                    log.warning(
+                        "Boundary verify error (non-fatal, keeping clip): %s", bv_exc
+                    )
+                    pre_render.append(clip_candidate)
+            selected = pre_render
+        else:
+            pass  # No sentence spans → skip boundary verification
+
+        if not selected:
+            log.info(
+                "All clips dropped by boundary verification",
+                extra={"source_id": source_id},
+            )
+            # Recoverable: a later run may verify better boundaries (sentence
+            # cache is now warm, fresh LLM pass). Respect exhaust_source like
+            # the render-success path — never permanently retire the source.
+            new_status = (
+                "partially_done" if campaign_cfg.ranking.exhaust_source else "done"
+            )
+            mark_source_status(session, source_id, new_status)
+            set_source_stage(session, source_id, "complete")
+            session.commit()
+            return []
 
         # Stage 6: download
         source_video_path = download_source(

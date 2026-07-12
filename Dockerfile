@@ -44,6 +44,14 @@ COPY migrations/ ./migrations/
 COPY deploy/crontab deploy/start.sh ./deploy/
 RUN chmod +x ./deploy/start.sh
 
+# torch is required by `punctuators` (punctuation restoration for clip
+# boundaries). Install the CPU-ONLY wheel FIRST so the punctuators install
+# below finds torch already satisfied — the default PyPI wheel drags in ~2GB
+# of CUDA libraries the Railway container can never use; the cpu wheel is
+# ~200MB. Decision documented 2026-07-12 (reviewer issue #2): torch is
+# intentionally present in this image.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
 RUN pip install --no-cache-dir \
     fastapi \
     "uvicorn[standard]" \
@@ -64,6 +72,7 @@ RUN pip install --no-cache-dir \
     boto3 \
     modal \
     pillow \
+    punctuators \
     && pip install --no-cache-dir --no-deps -e .
 
 RUN mkdir -p /data/clips/raw /data/clips/clips /data/clips/thumbs /data/clips/logs
