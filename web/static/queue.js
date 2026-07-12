@@ -9,8 +9,9 @@
  *   - Destination platform glyphs (inline SVG).
  *   - Source credit etched at panel base.
  *   - Tap → panel steps forward → full-screen review overlay.
- *   - Approve: panel rises and dissolves into light, auto-advances.
- *   - Reject: panel sinks.
+ *   - Approve: panel rises and dissolves into light, moves to Approved section.
+ *   - Reject: panel sinks; preset-chip reason picker replaces free-text.
+ *   - "Approved" collapsible section (approved|scheduled|posted) — never vanishes.
  *   - Filter bar: All / Today's batch / [campaigns] || Clips / Memes (kind).
  *   - Empty state: floor + light-stream line.
  *
@@ -37,6 +38,19 @@ const PLATFORM_ICON = {
     <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.747l7.73-8.835L1.254 2.25H8.08l4.259 5.631 5.905-5.631zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
   </svg>`,
 };
+
+// ── Preset rejection reasons (contract §4 — single source of truth on backend) ─
+
+const REJECT_PRESETS = [
+  { code: 'weak_hook',            label: 'Weak hook' },
+  { code: 'bad_cut',              label: 'Bad cut / not a complete thought' },
+  { code: 'boring',               label: 'Boring / no tension' },
+  { code: 'framing_captions',     label: 'Framing or captions wrong' },
+  { code: 'off_brand',            label: 'Off-brand' },
+  { code: 'claim_not_defensible', label: 'Claim not defensible' },
+  { code: 'wrong_length',         label: 'Too long / too short' },
+  { code: 'other',                label: 'Other' },
+];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -74,7 +88,6 @@ function _escHtml(str) {
 
 function _platformGlyphs(channels) {
   if (!channels || channels.length === 0) return '';
-  // Guess platform from channel name
   const infer = (name) => {
     const n = (name || '').toLowerCase();
     if (n.includes('youtube') || n.includes('yt')) return 'youtube';
@@ -97,18 +110,27 @@ function _platformGlyphs(channels) {
 // ── State ─────────────────────────────────────────────────────────────────────
 
 /** @type {Array<Object>} */
-let _clips        = [];
-let _campaigns    = [];
-let _activeCampaign = 'all';
-let _todayOnly    = false;
-let _kindFilter   = 'all';   // 'all' | 'clip' | 'meme'
-let _ctx          = null;
-let _reviewIdx    = -1;      // index into _visibleClips() of currently-open review
+let _clips         = [];
+let _approvedClips = [];   // approved | scheduled | posted
+let _campaigns     = [];
+let _activeCampaign  = 'all';
+let _todayOnly       = false;
+let _kindFilter      = 'all';   // 'all' | 'clip' | 'meme'
+let _ctx             = null;
+let _reviewIdx       = -1;      // unused but retained for future nav
 
 // ── Public ────────────────────────────────────────────────────────────────────
 
 export function initQueue(container, ctx) {
-  _ctx = ctx;
+  _ctx           = ctx;
+  _clips         = [];
+  _approvedClips = [];
+  _campaigns     = [];
+  _activeCampaign  = 'all';
+  _todayOnly       = false;
+  _kindFilter      = 'all';
+  _reviewIdx       = -1;
+
   container.innerHTML = '';
 
   // Notification prompt banner
@@ -125,6 +147,13 @@ export function initQueue(container, ctx) {
   readySection.id = 'queue-ready-section';
   container.appendChild(readySection);
 
+  // "Approved" collapsible section (between ready and fail — bug fix)
+  const approvedSection = document.createElement('div');
+  approvedSection.id    = 'queue-approved-section';
+  approvedSection.className = 'queue-approved-section';
+  approvedSection.style.display = 'none';
+  container.appendChild(approvedSection);
+
   // "Didn't pass review" section (hidden when empty)
   const failSection = document.createElement('div');
   failSection.id = 'queue-fail-section';
@@ -134,18 +163,17 @@ export function initQueue(container, ctx) {
 
   _renderFilters();
   _load();
+  _loadApproved();
 }
 
 export function refreshQueue() {
   _load();
+  _loadApproved();
 }
 
 // ── Internal ──────────────────────────────────────────────────────────────────
 
 async function _load() {
-  // #queue-cards only exists once _renderCards() has drawn a ready grid, so on a
-  // fresh load it is absent — fall back to the always-present ready section for the
-  // skeleton instead of bailing out (which left the queue permanently blank).
   if (_clips.length === 0) {
     const skeletonTarget =
       document.getElementById('queue-cards') ||
@@ -174,7 +202,6 @@ async function _load() {
     names.forEach((n) => { if (!_campaigns.includes(n)) _campaigns.push(n); });
     _renderFilters();
 
-    // Badge shows only ready/pending clips (not didnt_pass failures)
     const badgeCount = _clips.filter((c) => c.gate_status !== 'didnt_pass').length;
     _ctx.onBadge(badgeCount);
     _renderCards();
@@ -197,6 +224,33 @@ async function _load() {
   }
 }
 
+async function _loadApproved() {
+  try {
+    const data = await _ctx.mockFetch(
+      // Real mode: three separate calls (API status param is single-value)
+      async () => {
+        const [a, s, p] = await Promise.all([
+          _ctx.api.getClips({ status: 'approved',  limit: 100 }),
+          _ctx.api.getClips({ status: 'scheduled', limit: 100 }),
+          _ctx.api.getClips({ status: 'posted',    limit: 100 }),
+        ]);
+        return [...(Array.isArray(a) ? a : []), ...(Array.isArray(s) ? s : []), ...(Array.isArray(p) ? p : [])];
+      },
+      // Mock mode: use approvedClips fixture
+      () => {
+        const fc = Array.isArray(_ctx.fixtures.approvedClips) ? _ctx.fixtures.approvedClips : [];
+        if (_activeCampaign !== 'all') return fc.filter((c) => c.campaign === _activeCampaign);
+        return fc;
+      }
+    );
+    _approvedClips = Array.isArray(data) ? data : [];
+    _renderApprovedSection();
+  } catch (err) {
+    if (err.status === 401) { _ctx.onUnauthorized(); return; }
+    // Non-fatal — approved section stays hidden
+  }
+}
+
 // ── Filters ───────────────────────────────────────────────────────────────────
 
 function _renderFilters() {
@@ -204,7 +258,6 @@ function _renderFilters() {
   if (!wrap) return;
   wrap.innerHTML = '';
 
-  // Row 1 — batch / campaign filters
   const bar1 = document.createElement('div');
   bar1.className = 'filter-bar';
   bar1.setAttribute('role', 'group');
@@ -227,7 +280,6 @@ function _renderFilters() {
 
   wrap.appendChild(bar1);
 
-  // Row 2 — kind filter
   const bar2 = document.createElement('div');
   bar2.className = 'kind-filter-bar';
   bar2.setAttribute('role', 'group');
@@ -269,16 +321,25 @@ function _onCampaignFilter(id) {
   }
   _renderFilters();
   _renderCards();
+  _renderApprovedSection();
 }
 
 function _onKindFilter(id) {
   _kindFilter = id;
   _renderFilters();
-  _load();  // re-fetch with kind param
+  _load();
 }
 
 function _visibleClips() {
   return _clips.filter((c) => {
+    if (_activeCampaign !== 'all' && c.campaign !== _activeCampaign) return false;
+    if (_todayOnly && !_isToday(c.proposed_slot)) return false;
+    return true;
+  });
+}
+
+function _visibleApproved() {
+  return _approvedClips.filter((c) => {
     if (_activeCampaign !== 'all' && c.campaign !== _activeCampaign) return false;
     if (_todayOnly && !_isToday(c.proposed_slot)) return false;
     return true;
@@ -292,9 +353,7 @@ async function _renderCards() {
   const failSection  = document.getElementById('queue-fail-section');
   if (!readySection) return;
 
-  const visible = _visibleClips();
-
-  // Partition into ready (gate_status: ready/overridden/pending) vs didnt_pass
+  const visible    = _visibleClips();
   const readyClips = visible.filter((c) => c.gate_status !== 'didnt_pass');
   const failClips  = visible.filter((c) => c.gate_status === 'didnt_pass');
 
@@ -347,6 +406,67 @@ async function _renderCards() {
   });
 }
 
+// ── Approved section ──────────────────────────────────────────────────────────
+
+function _renderApprovedSection() {
+  const section = document.getElementById('queue-approved-section');
+  if (!section) return;
+
+  const visible = _visibleApproved();
+
+  if (visible.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+
+  section.style.display = '';
+  section.innerHTML = `
+    <details class="queue-approved-details" open>
+      <summary class="queue-section-header queue-section-header--approved">
+        Approved (${visible.length})
+      </summary>
+      <div class="queue-approved-grid">
+        ${visible.map(_buildApprovedCard).join('')}
+      </div>
+    </details>`;
+}
+
+function _buildApprovedCard(clip) {
+  const statusLabel = clip.status === 'posted'    ? 'Posted'
+    : clip.status === 'scheduled' ? 'Scheduled'
+    : 'Approved';
+
+  const statusCls = clip.status === 'posted'    ? 'chip-accent'
+    : clip.status === 'scheduled' ? 'chip-amber'
+    : '';
+
+  const scheduledLine = clip.scheduled_at
+    ? `<div class="approved-card-slot">${_escHtml(_fmtSlot(clip.scheduled_at))}</div>`
+    : '';
+
+  const thumbHtml = clip.thumb_url
+    ? `<img class="approved-card-thumb" src="${_escHtml(clip.thumb_url)}" alt="" loading="lazy">`
+    : `<div class="approved-card-thumb-placeholder" aria-hidden="true">
+         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+           <polygon points="23 7 16 12 23 17 23 7"/>
+           <rect x="1" y="5" width="15" height="14" rx="2"/>
+         </svg>
+       </div>`;
+
+  return `
+    <div class="approved-clip-card">
+      ${thumbHtml}
+      <div class="approved-card-body">
+        <div class="approved-card-hook">${_escHtml(clip.hook || '—')}</div>
+        <div class="approved-card-meta">
+          <span class="chip ${statusCls}" style="font-size:10px">${_escHtml(statusLabel)}</span>
+          ${clip.campaign ? `<span class="chip" style="font-size:10px">${_escHtml(clip.campaign)}</span>` : ''}
+        </div>
+        ${scheduledLine}
+      </div>
+    </div>`;
+}
+
 function _emptyStateHTML(subtitle) {
   return `
     <div class="empty-state">
@@ -387,7 +507,6 @@ function _buildCard(clip, idx) {
   el.dataset.aspect = aspect;
   el.dataset.kind   = kind;
 
-  // Media HTML
   let mediaContent;
   if (kind === 'meme' && clip.thumb_url) {
     mediaContent = `<img class="clip-thumb" src="${_escHtml(clip.thumb_url)}" alt="Meme preview" loading="lazy">`;
@@ -402,23 +521,19 @@ function _buildCard(clip, idx) {
         aria-label="${_escHtml(clip.hook || 'Clip preview')}"
       ></video>`;
   } else {
-    // Mock mode — no URL
     const iconSvg = kind === 'meme'
       ? `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`
       : `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>`;
-    mediaContent = `
-      <div class="clip-video-placeholder" aria-hidden="true">
-        ${iconSvg}
-      </div>`;
+    mediaContent = `<div class="clip-video-placeholder" aria-hidden="true">${iconSvg}</div>`;
   }
 
-  const platformGlyphs = _platformGlyphs(clip.destination_channels);
-  const kindLabel  = kind === 'meme' ? 'Meme' : 'Clip';
-  const modeHtml   = mode === 'demo'
+  const platformGlyphs  = _platformGlyphs(clip.destination_channels);
+  const kindLabel       = kind === 'meme' ? 'Meme' : 'Clip';
+  const modeHtml        = mode === 'demo'
     ? `<span class="badge-demo">DEMO</span>`
     : `<span class="badge-live">LIVE</span>`;
 
-  const sourceHandle = clip.source?.handle || clip.source_handle || null;
+  const sourceHandle   = clip.source?.handle || clip.source_handle || null;
   const sourcePlatform = clip.source?.platform || '';
   const sourcePlatformIcon = PLATFORM_ICON[sourcePlatform] || '';
 
@@ -453,13 +568,10 @@ function _buildCard(clip, idx) {
       ${clip.proposed_slot ? `<div class="clip-slot">Proposed: ${_fmtSlot(clip.proposed_slot)}</div>` : ''}
     </div>`;
 
-  // Tap → open review
   el.addEventListener('click', (e) => {
-    // Don't open review if clicking a button inside (there are none in the new card, but guard)
     if (e.target.closest('button')) return;
     _openReview(clip, el);
   });
-  // Keyboard accessibility
   el.tabIndex = 0;
   el.setAttribute('role', 'button');
   el.setAttribute('aria-label', `Review: ${clip.hook || clip.id}`);
@@ -482,7 +594,6 @@ function _buildFailCard(clip, idx) {
   el.dataset.id   = clip.id;
   el.dataset.kind = kind;
 
-  // Build a plain-language summary from gate_reasons
   const failReasons = (clip.gate_reasons || [])
     .filter((r) => !r.pass)
     .map((r) => _escHtml(r.reason || r.check))
@@ -492,7 +603,6 @@ function _buildFailCard(clip, idx) {
     ? `<span class="chip chip-amber">Score ${Math.round(clip.formula_score * 100)}/100</span>`
     : '';
 
-  // Thumbnail or placeholder
   let thumbHtml;
   if (kind === 'meme' && clip.thumb_url) {
     thumbHtml = `<img class="clip-thumb clip-thumb--fail" src="${_escHtml(clip.thumb_url)}" alt="Meme preview" loading="lazy">`;
@@ -533,7 +643,6 @@ function _buildFailCard(clip, idx) {
       </div>
     </div>`;
 
-  // Override button handler
   const overrideBtn = el.querySelector('.fail-override-btn');
   if (overrideBtn) {
     overrideBtn.addEventListener('click', async (e) => {
@@ -545,7 +654,6 @@ function _buildFailCard(clip, idx) {
           () => _ctx.api.overrideGate(clip.id),
           () => ({ gate_status: 'overridden' })
         );
-        // Update local state and re-render
         const target = _clips.find((c) => c.id === clip.id);
         if (target) target.gate_status = 'overridden';
         _ctx.toast('Clip moved to review queue', 'success');
@@ -565,10 +673,7 @@ function _buildFailCard(clip, idx) {
 // ── Review overlay ────────────────────────────────────────────────────────────
 
 function _openReview(clip, cardEl) {
-  // Remove any existing review overlay
   document.getElementById('review-overlay-root')?.remove();
-
-  // Step card forward
   cardEl.classList.add('panel-active');
 
   const kind  = clip.kind  || 'clip';
@@ -580,7 +685,6 @@ function _openReview(clip, cardEl) {
   const sourcePlatform = clip.source?.platform || '';
   const platformGlyphs = _platformGlyphs(clip.destination_channels);
 
-  // Build media HTML for review
   let mediaHtml;
   if (kind === 'meme') {
     if (clip.thumb_url) {
@@ -597,33 +701,20 @@ function _openReview(clip, cardEl) {
         </div>`;
     }
   } else {
-    // Clips: use video_url if available, otherwise API path (server 307 redirect handles R2)
     const videoSrc = clip.video_url || `/api/clips/${encodeURIComponent(clip.id)}/video`;
-    if (clip.video_url || !clip.video_url === false) {
-      mediaHtml = `
-        <video
-          class="review-video"
-          playsinline
-          controls
-          preload="metadata"
-          ${clip.thumb_url ? `poster="${_escHtml(clip.thumb_url)}"` : ''}
-          src="${_escHtml(videoSrc)}"
-          aria-label="${_escHtml(clip.hook || 'Clip preview')}"
-        ></video>`;
-    } else {
-      mediaHtml = `
-        <div class="review-media-placeholder">
-          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-            <polygon points="23 7 16 12 23 17 23 7"/>
-            <rect x="1" y="5" width="15" height="14" rx="2"/>
-          </svg>
-          <span>No video (mock mode)</span>
-        </div>`;
-    }
+    mediaHtml = `
+      <video
+        class="review-video"
+        playsinline
+        controls
+        preload="metadata"
+        ${clip.thumb_url ? `poster="${_escHtml(clip.thumb_url)}"` : ''}
+        src="${_escHtml(videoSrc)}"
+        aria-label="${_escHtml(clip.hook || 'Clip preview')}"
+      ></video>`;
   }
 
-  // Visible clips for prev/next navigation
-  const visible = _visibleClips();
+  const visible    = _visibleClips();
   const currentIdx = visible.findIndex((c) => c.id === clip.id);
 
   const overlay = document.createElement('div');
@@ -695,7 +786,6 @@ function _openReview(clip, cardEl) {
 
   document.body.appendChild(overlay);
 
-  // Animate in
   requestAnimationFrame(() => {
     requestAnimationFrame(() => overlay.classList.add('open'));
   });
@@ -707,19 +797,13 @@ function _openReview(clip, cardEl) {
   };
 
   overlay.querySelector('#rv-close').addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
-  // Backdrop click to close
-  overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) close();
-  });
-
-  // Keyboard close
   const onKey = (e) => {
     if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
   };
   document.addEventListener('keydown', onKey);
 
-  // Prev / Next navigation
   const prevBtn = overlay.querySelector('#rv-prev');
   const nextBtn = overlay.querySelector('#rv-next');
   if (prevBtn && currentIdx > 0) {
@@ -743,17 +827,14 @@ function _openReview(clip, cardEl) {
     });
   }
 
-  // Approve
   overlay.querySelector('#rv-approve').addEventListener('click', () => {
     _doApprove(clip, cardEl, overlay, null);
   });
 
-  // Reject
   overlay.querySelector('#rv-reject').addEventListener('click', () => {
     _showRejectField(overlay, clip, cardEl);
   });
 
-  // Edit caption
   overlay.querySelector('#rv-edit').addEventListener('click', () => {
     _editCaption(overlay, clip, cardEl);
   });
@@ -771,17 +852,18 @@ async function _doApprove(clip, cardEl, overlay, captionOverride) {
       () => ({ status: 'approved' })
     );
 
-    // Close review overlay
     overlay.classList.remove('open');
     overlay.addEventListener('transitionend', () => overlay.remove(), { once: true });
 
-    // Animate card: rises and dissolves into light
     cardEl.classList.remove('panel-active');
     cardEl.classList.add('approving');
 
-    // Wait for animation, then remove from state
     setTimeout(() => {
+      // Move clip from pending into the approved section instead of dropping it
       _clips = _clips.filter((c) => c.id !== clip.id);
+      _approvedClips.unshift({ ...clip, status: 'approved' });
+      _renderApprovedSection();
+
       cardEl.remove();
       _ctx.onBadge(_visibleClips().length);
 
@@ -801,8 +883,9 @@ async function _doApprove(clip, cardEl, overlay, captionOverride) {
   }
 }
 
+// ── Reject flow — preset chips + optional note ────────────────────────────────
+
 function _showRejectField(overlay, clip, cardEl) {
-  // Show a reason textarea inside the review overlay
   const controlsEl = overlay.querySelector('#rv-controls');
   if (!controlsEl) return;
 
@@ -812,32 +895,68 @@ function _showRejectField(overlay, clip, cardEl) {
   const sheet = document.createElement('div');
   sheet.id = 'rv-reject-sheet';
   sheet.className = 'review-reject-sheet';
+
+  const selectedCodes = new Set();
+
+  const chipsHTML = REJECT_PRESETS.map((p) => `
+    <button type="button"
+            class="reject-chip"
+            data-code="${_escHtml(p.code)}"
+            aria-pressed="false">
+      ${_escHtml(p.label)}
+    </button>`).join('');
+
   sheet.innerHTML = `
-    <textarea id="rv-reject-reason" class="review-caption-editor" rows="3"
-      placeholder="Optional reason (helps the ranker learn)…" style="min-height:72px"></textarea>
-    <div style="display:flex;gap:8px;margin-top:8px;">
+    <div class="reject-sheet-label">Why are you rejecting this?</div>
+    <div class="reject-chips" role="group" aria-label="Rejection reasons">
+      ${chipsHTML}
+    </div>
+    <textarea id="rv-reject-note" class="review-caption-editor" rows="2"
+      placeholder="Optional note — helps the ranker learn…"
+      style="min-height:58px;margin-top:10px"></textarea>
+    <div style="display:flex;gap:8px;margin-top:10px;">
       <button class="btn btn-ghost btn-sm" id="rv-reject-cancel">Cancel</button>
-      <button class="btn btn-danger" id="rv-reject-confirm">Reject clip</button>
+      <button class="btn btn-danger" id="rv-reject-confirm" disabled>Reject clip</button>
     </div>`;
 
-  // Insert before controls
   controlsEl.before(sheet);
 
+  const confirmBtn = sheet.querySelector('#rv-reject-confirm');
+
+  sheet.querySelectorAll('.reject-chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const code = chip.dataset.code;
+      if (selectedCodes.has(code)) {
+        selectedCodes.delete(code);
+        chip.classList.remove('selected');
+        chip.setAttribute('aria-pressed', 'false');
+      } else {
+        selectedCodes.add(code);
+        chip.classList.add('selected');
+        chip.setAttribute('aria-pressed', 'true');
+      }
+      // Enable Reject button only when ≥1 chip is selected
+      confirmBtn.disabled = selectedCodes.size === 0;
+    });
+  });
+
   sheet.querySelector('#rv-reject-cancel').addEventListener('click', () => sheet.remove());
-  sheet.querySelector('#rv-reject-confirm').addEventListener('click', async () => {
-    const reason = sheet.querySelector('#rv-reject-reason').value.trim();
+
+  confirmBtn.addEventListener('click', async () => {
+    const note    = sheet.querySelector('#rv-reject-note').value.trim();
+    const reasons = [...selectedCodes];
     sheet.remove();
-    await _doReject(clip, cardEl, overlay, reason);
+    await _doReject(clip, cardEl, overlay, { reasons, note: note || undefined });
   });
 }
 
-async function _doReject(clip, cardEl, overlay, reason) {
+async function _doReject(clip, cardEl, overlay, payload) {
   const rejectBtn = overlay.querySelector('#rv-reject');
   if (rejectBtn) { rejectBtn.disabled = true; rejectBtn.innerHTML = '<span class="spinner"></span>'; }
 
   try {
     await _ctx.mockFetch(
-      () => _ctx.api.rejectClip(clip.id, reason),
+      () => _ctx.api.rejectClip(clip.id, payload),
       () => ({ status: 'rejected' })
     );
 
@@ -866,8 +985,6 @@ function _editCaption(overlay, clip, cardEl) {
   const captionDisplay = overlay.querySelector('#rv-caption-display');
   const captionWrap    = overlay.querySelector('.review-caption-wrap');
   if (!captionWrap) return;
-
-  // Replace display with textarea if not already editing
   if (overlay.querySelector('#rv-caption-editor')) return;
 
   const textarea = document.createElement('textarea');
@@ -879,7 +996,6 @@ function _editCaption(overlay, clip, cardEl) {
   captionDisplay.replaceWith(textarea);
   textarea.focus();
 
-  // Update controls
   const controlsEl = overlay.querySelector('#rv-controls');
   if (controlsEl) {
     controlsEl.innerHTML = `
@@ -894,13 +1010,11 @@ function _editCaption(overlay, clip, cardEl) {
           () => ({ caption: newCaption })
         );
         clip.caption = newCaption;
-        // Restore display
         const display = document.createElement('div');
         display.id = 'rv-caption-display';
         display.className = 'review-caption-display';
         display.textContent = newCaption;
         textarea.replaceWith(display);
-        // Restore controls
         controlsEl.innerHTML = `
           <button class="btn btn-danger" id="rv-reject" style="flex:none;min-width:80px">Reject</button>
           <button class="btn btn-secondary btn-icon" id="rv-edit" aria-label="Edit caption" title="Edit caption">
@@ -938,7 +1052,7 @@ function _buildNotifBanner() {
   wrap.innerHTML = `
     <p>Enable notifications to be alerted when new clips are ready.</p>
     <button class="btn btn-secondary btn-sm" id="enable-notif-btn">Enable</button>
-    <button class="btn btn-ghost btn-sm" id="dismiss-notif-btn" aria-label="Dismiss">✕</button>`;
+    <button class="btn btn-ghost btn-sm" id="dismiss-notif-btn" aria-label="Dismiss">&#x2715;</button>`;
 
   wrap.querySelector('#enable-notif-btn').addEventListener('click', async () => {
     const perm = await Notification.requestPermission();

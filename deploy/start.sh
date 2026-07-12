@@ -35,6 +35,12 @@ if [ -n "${STORAGE_DIR:-}" ] && [ -d "${STORAGE_DIR}" ]; then
   done
 fi
 
+# yt-dlp must be CURRENT or YouTube serves DRM-poisoned/SABR responses
+# ("This video is DRM protected" on normal videos, "Requested format is not
+# available"). The Dockerfile layer that installs it is cached by Railway for
+# weeks, so upgrade at boot; failure is non-fatal (keeps the baked version).
+pip install --no-cache-dir --upgrade --quiet yt-dlp || echo "WARN: yt-dlp upgrade failed; using baked version"
+
 attempt=0
 until alembic upgrade head; do
   attempt=$((attempt + 1))

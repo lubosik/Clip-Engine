@@ -220,12 +220,16 @@ def _build_prompt(
     comment_summary: str | None,
     clip_len: tuple[int, int],
     max_clips: int,
+    preference_context: str = "",
 ) -> str:
     """Build the combined segmentation + ranking prompt.
 
     ONE call does both jobs: it first splits the transcript into self-contained
     topic segments, then selects clip candidates whose boundaries align to those
     segments. This avoids a second full-transcript LLM call per source.
+
+    preference_context: optional learned-preference block injected AFTER the
+    campaign ranking rules and BEFORE the sentence-boundary rules.
     """
     seg_lines = "\n".join(
         f"[{seg['start']:.1f}s-{seg['end']:.1f}s] {seg['text']}" for seg in transcript
@@ -235,13 +239,18 @@ def _build_prompt(
     if comment_summary:
         comment_section = f"\n\nCOMMENT SIGNAL (top recurring themes from audience):\n{comment_summary}"
 
+    # Preference block: injected after campaign rules, before sentence/topic rules.
+    pref_section = ""
+    if preference_context and preference_context.strip():
+        pref_section = f"\n\n{preference_context.strip()}"
+
     return f"""You are a clip ranking assistant. Analyse the transcript below and identify the best moments to cut as short-form clips.
 
 CAMPAIGN RANKING RULES:
 {rules.strip()}
 
 CLIP LENGTH CONSTRAINTS: minimum {clip_len[0]}s, maximum {clip_len[1]}s
-MAXIMUM CLIPS TO RETURN: {max_clips}{comment_section}
+MAXIMUM CLIPS TO RETURN: {max_clips}{comment_section}{pref_section}
 
 SENTENCE-BOUNDARY RULE (mandatory): Choose start at the FIRST word of a sentence \
 and end at the LAST word of a sentence — the clip must be a complete, coherent \
@@ -315,16 +324,20 @@ def rank_moments(
     comment_summary: str | None,
     clip_len: tuple[int, int],
     max_clips: int,
+    preference_context: str = "",
 ) -> list[dict]:
     """
     Call the LLM to rank transcript moments.
 
     Args:
-        transcript:      [{start: float, end: float, text: str}]
-        rules:           campaign.ranking.ranking_rules text
-        comment_summary: optional per-post comment aggregation summary
-        clip_len:        (min_seconds, max_seconds)
-        max_clips:       max clips to request (LLM hint, enforced again by select_clips)
+        transcript:          [{start: float, end: float, text: str}]
+        rules:               campaign.ranking.ranking_rules text
+        comment_summary:     optional per-post comment aggregation summary
+        clip_len:            (min_seconds, max_seconds)
+        max_clips:           max clips to request (LLM hint, enforced again by select_clips)
+        preference_context:  optional learned-preference block (contract §6).
+                             Injected into the prompt after ranking rules and before
+                             sentence-boundary rules.  Pass "" to omit (default).
 
     Returns:
         [{start, end, score, hook, reason}] — validated, length-filtered.
@@ -364,7 +377,8 @@ def rank_moments(
     # ONE combined call does segmentation + ranking (topics + clips together),
     # instead of a second full-transcript segmentation call.
     prompt = _build_prompt(
-        prompt_transcript, rules, comment_summary, clip_len, max_clips
+        prompt_transcript, rules, comment_summary, clip_len, max_clips,
+        preference_context=preference_context,
     )
 
     def _call() -> str:

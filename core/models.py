@@ -82,6 +82,15 @@ class Source(Base):
     source_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
     # pending | selected | done | partially_done
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    # Pipeline stage (migration 005, contracts docs/PIPELINE_QUEUE_CONTRACTS.md §2):
+    # queued | transcribing | identifying | rendering | reviewing | complete | failed
+    stage: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    # Clips selected by ranking — the live-progress denominator ("n/N clipped")
+    clips_identified: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stage_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stage_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # [[start, end], ...] float seconds — ranges already cut into clips
     used_ranges: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=list)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -102,6 +111,7 @@ class Source(Base):
     __table_args__ = (
         Index("ix_sources_source_id", "source_id"),
         Index("ix_sources_campaign_status", "campaign", "status"),
+        Index("ix_sources_stage", "stage"),
     )
 
 
@@ -177,6 +187,11 @@ class Clip(Base):
     # {"tiktok_fitness": "https://tiktok.com/...", ...}
     posted_permalinks: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     reject_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Structured operator feedback (migration 005):
+    # {"action": "approved"|"rejected", "reasons": [...], "note": str|None, "decided_at": iso}
+    review_feedback: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Preference profile version active when this clip was ranked (learning loop)
+    profile_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
@@ -329,6 +344,39 @@ class ApifyRun(Base):
         Index("ix_apify_runs_campaign", "campaign"),
         Index("ix_apify_runs_created_at", "created_at"),
         Index("ix_apify_runs_kind", "kind"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# preference_profiles — learned operator preferences (migration 005)
+# ---------------------------------------------------------------------------
+
+class PreferenceProfile(Base):
+    """Versioned per-campaign preference profile distilled from operator
+    approve/reject decisions (in-context preference learning — never
+    fine-tuning, never able to relax safety or hardwired design rules).
+
+    The active profile is the row with the highest version for a campaign.
+    """
+
+    __tablename__ = "preference_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    campaign: Mapped[str] = mapped_column(
+        String(128), ForeignKey("campaigns.name", ondelete="CASCADE"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # list[str] — distilled, measurable selection rules
+    rules: Mapped[list] = mapped_column(JSONB, nullable=False)
+    # {"decisions_count": int, "model": str, ...}
+    meta: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("campaign", "version", name="uq_preference_profiles_campaign_version"),
+        Index("ix_preference_profiles_campaign", "campaign"),
     )
 
 

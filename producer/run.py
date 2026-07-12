@@ -51,6 +51,56 @@ DEMO_CLIP_TARGET = 3
 DEMO_RENDER_CAP = 10
 
 
+def set_source_stage(
+    session: Any,
+    source_id: str,
+    stage: str,
+    *,
+    clips_identified: int | None = None,
+    error: str | None = None,
+) -> None:
+    """Update Source.stage and stage_updated_at, commit immediately.
+
+    Never raises out — logs the error and attempts a rollback on failure.
+    This ensures stage tracking never kills a source processing run.
+
+    stage: one of queued | transcribing | identifying | rendering |
+                   reviewing | complete | failed
+    clips_identified: set when ranking finishes (the denominator for "n/N").
+    error: human-readable failure description (truncated to 500 chars).
+    """
+    from core.models import Source as _Source
+
+    try:
+        src = session.query(_Source).filter_by(source_id=source_id).first()
+        if src is None:
+            log.warning(
+                "set_source_stage: source not found in DB",
+                extra={"source_id": source_id, "stage": stage},
+            )
+            return
+        src.stage = stage
+        src.stage_updated_at = datetime.now(tz=timezone.utc)
+        if clips_identified is not None:
+            src.clips_identified = clips_identified
+        if error is not None:
+            src.stage_error = str(error)[:500]
+        session.commit()
+        log.debug(
+            "Source stage set",
+            extra={"source_id": source_id, "stage": stage},
+        )
+    except Exception as exc:
+        log.error(
+            "set_source_stage failed",
+            extra={"source_id": source_id, "stage": stage, "error": str(exc)},
+        )
+        try:
+            session.rollback()
+        except Exception:
+            pass
+
+
 def _build_caption(template: str, hook: str, source_handle: str, hashtags: list[str]) -> str:
     hashtag_str = " ".join(h if h.startswith("#") else f"#{h}" for h in hashtags)
     return template.format(
@@ -69,6 +119,8 @@ def _process_source(
     *,
     run_mode: str,
     max_modal_spend: float | None = None,
+    preference_context: str = "",
+    profile_version: int | None = None,
 ) -> list[dict]:
     """
     Process a single source through stages 3–8.
@@ -118,6 +170,7 @@ def _process_source(
                 )
 
         # Stage 4: transcript
+        set_source_stage(session, source_id, "transcribing")
         ig_raw = source.get("raw") if platform == "instagram" else None
         try:
             segments = fetch_and_store_transcript(
@@ -136,6 +189,7 @@ def _process_source(
                 "Transcript fetch failed (transient); leaving source for a future run",
                 extra={"source_id": source_id, "error": str(exc)},
             )
+            set_source_stage(session, source_id, "failed", error=str(exc)[:500])
             session.rollback()
             return []
         session.commit()
@@ -146,11 +200,36 @@ def _process_source(
                 extra={"source_id": source_id},
             )
             mark_source_status(session, source_id, "done")
+            set_source_stage(session, source_id, "complete")
             session.commit()
             return []
 
         # Stage 5: rank → select
-        candidates = rank_clips(segments, comment_summary, campaign_cfg.ranking)
+        # Set 'identifying' BEFORE ranking (cost guard probe runs first for YouTube)
+        set_source_stage(session, source_id, "identifying")
+
+        # AVAILABILITY PROBE (cost guard): confirm the video is downloadable BEFORE
+        # paying for LLM ranking.  Seen live 2026-07-12: every YT download failed
+        # "DRM protected" AFTER paying for ranking.  The probe catches this cheaply.
+        if platform == "youtube":
+            try:
+                from producer.download import probe_youtube
+                probe_youtube(url)
+            except Exception as probe_exc:
+                log.warning(
+                    "YouTube availability probe failed; skipping LLM ranking "
+                    "(cost guard — video is undownloadable)",
+                    extra={"source_id": source_id, "error": str(probe_exc)},
+                )
+                # Leave source.status untouched (pending/selected) so a future
+                # run can retry when yt-dlp client chain improves.
+                set_source_stage(session, source_id, "failed", error=str(probe_exc)[:500])
+                return []
+
+        candidates = rank_clips(
+            segments, comment_summary, campaign_cfg.ranking,
+            preference_context=preference_context,
+        )
         selected = select_clips(candidates, used_ranges, campaign_cfg.ranking)
 
         if not selected:
@@ -159,6 +238,8 @@ def _process_source(
                 extra={"source_id": source_id, "candidates": len(candidates)},
             )
             mark_source_status(session, source_id, "done")
+            # 0 selected → straight to complete (nothing to review)
+            set_source_stage(session, source_id, "complete")
             session.commit()
             return []
 
@@ -180,8 +261,9 @@ def _process_source(
         # Warn if MTD spend is >= 80% of monthly budget
         _warn_if_near_monthly_budget(session, source_id)
 
-        # Mark selected so we don't pick it up again mid-run
+        # Mark selected so we don't pick it up again mid-run; set rendering stage.
         mark_source_status(session, source_id, "selected")
+        set_source_stage(session, source_id, "rendering", clips_identified=len(selected))
         session.commit()
 
         # Stage 6: download
@@ -248,6 +330,8 @@ def _process_source(
                     destination_channels=campaign_cfg.destinations.postiz_channels,
                     status="pending_review",
                     # gate_status defaults to 'pending' until run_gate completes
+                    # Learning loop: stamp active profile version at creation time
+                    profile_version=profile_version,
                 )
                 session.add(clip_row)
                 session.flush()  # get the id
@@ -265,6 +349,7 @@ def _process_source(
                         transcript_segments=tr_segments,
                         campaign_cfg=campaign_cfg,
                         session=session,
+                        preference_context=preference_context,
                     )
                     clip_row.gate_status = gate_result.gate_status
                     clip_row.gate_reasons = gate_result.gate_reasons
@@ -317,6 +402,13 @@ def _process_source(
         if new_ranges:
             update_used_ranges(session, source_id, new_ranges)
 
+        # Set stage: 'reviewing' when >=1 clip was inserted (human review needed);
+        # 'complete' when all renders failed (nothing to review).
+        if inserted_clips:
+            set_source_stage(session, source_id, "reviewing")
+        else:
+            set_source_stage(session, source_id, "complete")
+
         # Determine final source status
         if campaign_cfg.ranking.exhaust_source:
             # Caller (exhaust loop) will set done; mark partially_done for now
@@ -347,6 +439,8 @@ def _process_source(
             session.rollback()
         except Exception:
             pass
+        # Set stage to 'failed' AFTER rollback so this commit is clean.
+        set_source_stage(session, source_id, "failed", error=str(exc)[:500])
         return []
 
 
@@ -604,6 +698,32 @@ def run_campaign(
 
     cpu_count = os.cpu_count() or 2
 
+    # Learning loop: fetch preference context ONCE per run before the source loop.
+    # Failures are non-fatal — missing context just means no preference injection.
+    preference_context = ""
+    profile_version: int | None = None
+    try:
+        from core.preferences import build_preference_context, get_active_profile
+        from core.db import get_session as _get_pref_session
+        with _get_pref_session() as pref_session:
+            preference_context = build_preference_context(pref_session, campaign_name)
+            active_profile = get_active_profile(pref_session, campaign_name)
+            if active_profile is not None:
+                profile_version = active_profile.version
+        log.info(
+            "Preference context loaded",
+            extra={
+                "campaign": campaign_name,
+                "profile_version": profile_version,
+                "context_len": len(preference_context),
+            },
+        )
+    except Exception as pref_exc:
+        log.warning(
+            "Could not load preference context (non-fatal): %s", pref_exc,
+            extra={"campaign": campaign_name},
+        )
+
     # Demo runs target DEMO_CLIP_TARGET *ready* clips (gate_status='ready').
     # All renders (regardless of gate outcome) count toward DEMO_RENDER_CAP
     # to prevent unbounded spend when the gate keeps failing clips.
@@ -642,6 +762,8 @@ def run_campaign(
                 cpu_count,
                 run_mode=effective_mode,
                 max_modal_spend=max_modal_spend,
+                preference_context=preference_context,
+                profile_version=profile_version,
             )
             sources_processed += 1
             for c in clips:

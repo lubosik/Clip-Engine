@@ -97,8 +97,9 @@ export const api = {
     return request('POST', `/api/clips/${id}/approve`, body ? { body } : {});
   },
 
-  rejectClip(id, reason) {
-    return request('POST', `/api/clips/${id}/reject`, { body: { reason: reason ?? '' } });
+  // payload: {reasons: ["weak_hook",...], note?: "optional"} — legacy {reason:"text"} also accepted
+  rejectClip(id, payload) {
+    return request('POST', `/api/clips/${id}/reject`, { body: payload ?? {} });
   },
 
   patchClip(id, caption) {
@@ -161,5 +162,21 @@ export const api = {
     const entries = Object.entries(params).filter(([, v]) => v != null && v !== '');
     const qs = entries.length ? '?' + new URLSearchParams(entries).toString() : '';
     return request('GET', '/api/sources' + qs);
+  },
+
+  // In-progress sources (stage != complete and not failed >24h)
+  getSourcesProgress() {
+    return request('GET', '/api/sources?in_progress=1');
+  },
+
+  // Approval-rate time series — GET /api/analytics/approval-rate?campaign=X&weeks=N
+  getApprovalRate(campaign, weeks = 8) {
+    const qs = new URLSearchParams({ campaign, weeks: String(weeks) });
+    return request('GET', `/api/analytics/approval-rate?${qs}`);
+  },
+
+  // Preference profile for a campaign — GET /api/campaigns/{name}/profile
+  getProfile(campaign) {
+    return request('GET', `/api/campaigns/${encodeURIComponent(campaign)}/profile`);
   },
 };

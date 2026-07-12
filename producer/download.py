@@ -41,14 +41,87 @@ _YTDLP_CLIENT_CHAIN: list[list[str] | None] = [
 ]
 
 
-def _download_youtube(url: str, dest: Path) -> Path:
+def _try_ytdlp_chain(
+    base_opts: dict,
+    url: str,
+    *,
+    download: bool,
+) -> Any:
+    """Execute a yt-dlp operation through the _YTDLP_CLIENT_CHAIN retry loop.
+
+    download=True:  calls ydl.download([url]) — returns None on success.
+    download=False: calls ydl.extract_info(url, download=False) — returns the
+                    info dict on success (used by probe_youtube).
+
+    Raises on unrecoverable errors or after all chain entries are exhausted.
+    Only bot-check / DRM / format-unavailable errors trigger a client retry;
+    everything else (404, private, network) propagates immediately.
+    """
     try:
         import yt_dlp  # type: ignore[import]
     except ImportError as exc:
         raise ImportError(
-            "yt-dlp is required for YouTube downloads. Install with: pip install yt-dlp"
+            "yt-dlp is required for YouTube operations. "
+            "Install it with: pip install yt-dlp"
         ) from exc
 
+    last_exc: Exception | None = None
+    for clients in _YTDLP_CLIENT_CHAIN:
+        opts = dict(base_opts)
+        if clients is not None:
+            opts["extractor_args"] = {"youtube": {"player_client": clients}}
+            log.info(
+                "Retrying YouTube operation with player_client=%s",
+                ",".join(clients),
+                extra={"url": url},
+            )
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                if download:
+                    ydl.download([url])
+                    return None
+                else:
+                    return ydl.extract_info(url, download=False)
+            last_exc = None  # unreachable but keeps the loop logic clear
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc)
+            # Only retry for bot-check / DRM / format issues; other errors
+            # (404, private video, network) fail the same way on every client.
+            retryable = (
+                "Sign in to confirm" in msg
+                or "not a bot" in msg
+                or "DRM protected" in msg
+                or "Requested format is not available" in msg
+            )
+            if not retryable:
+                raise
+
+    if last_exc is not None:
+        raise last_exc
+    return None
+
+
+def probe_youtube(url: str) -> None:
+    """Probe a YouTube URL for availability WITHOUT downloading.
+
+    Uses the same _YTDLP_CLIENT_CHAIN retry logic as _download_youtube.
+    Call this BEFORE LLM ranking to avoid paying for clips that cannot
+    be downloaded (cost guard).
+
+    Raises on failure (DRM, private video, bot-check, format unavailable).
+    """
+    base_opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+    }
+    log.info("Probing YouTube availability (no download)", extra={"url": url})
+    _try_ytdlp_chain(base_opts, url, download=False)
+
+
+def _download_youtube(url: str, dest: Path) -> Path:
     base_opts: dict[str, Any] = {
         "format": _YTDLP_FORMAT,
         "outtmpl": str(dest.with_suffix(".%(ext)s")),
@@ -59,29 +132,7 @@ def _download_youtube(url: str, dest: Path) -> Path:
     }
 
     log.info("Downloading YouTube video", extra={"url": url, "dest": str(dest)})
-    last_exc: Exception | None = None
-    for clients in _YTDLP_CLIENT_CHAIN:
-        ydl_opts = dict(base_opts)
-        if clients is not None:
-            ydl_opts["extractor_args"] = {"youtube": {"player_client": clients}}
-            log.info(
-                "Retrying YouTube download with player_client=%s", ",".join(clients),
-                extra={"url": url},
-            )
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            last_exc = None
-            break
-        except Exception as exc:  # DownloadError subclasses vary by yt-dlp version
-            last_exc = exc
-            msg = str(exc)
-            # Only the bot-check / auth wall benefits from a client retry;
-            # anything else (404, private, network) fails the same way again.
-            if "Sign in to confirm" not in msg and "not a bot" not in msg:
-                raise
-    if last_exc is not None:
-        raise last_exc
+    _try_ytdlp_chain(base_opts, url, download=True)
 
     # yt-dlp may change the extension; find the actual file
     mp4_path = dest.with_suffix(".mp4")

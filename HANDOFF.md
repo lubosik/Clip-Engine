@@ -528,3 +528,79 @@ Both 07-11 blockers cleared + 4 workstreams landed. **573 tests pass** (was 521;
 **Tests added:** test_hook_style.py (33), test_apify_spend.py (9), test_gate_relaxation.py (10). Migration 004 auto-applies on deploy (deploy/start.sh runs `alembic upgrade head`).
 
 **NEXT SESSION:** (1) verify deploy: live /sw.js flips to v11, /api/spend has `apify` block, migration 004 applied; (2) run the demo END-TO-END (user will say when — expect: discovery SKIPPED via backlog, hooks with strategic caps + no em dashes, medical_claims relaxed → real READY yield for peptides); (3) frame-review hooks vs HOOK_CAPITALISATION.md; (4) rotate ALL chat-pasted creds (now incl. the new PAT + new Apify token).
+
+### 2026-07-12 (later) — Demo run #1 on new stack: NEW RUN-KILLER (yt-dlp DRM) + pipeline-queue/learning-loop build kicked off
+- Deploy verified (sw v11 live ~2min after push, migration 004 in prod PG, /api/spend apify block serving).
+- **Demo run (pid 26) triggered → cost-optimization wins CONFIRMED live:** discovery SKIPPED ("93 unfinished sources in backlog ≥ 20"), cached transcripts reused, Sonnet-5 combined ranking + topical gate working (4-6 clips/source identified). Apify spend: $0.
+- **NEW RUN-KILLER: every YouTube download fails "This video is DRM protected"** (+1 "Requested format is not available") — even sources that downloaded fine on 07-09. Classic stale-yt-dlp symptom (YouTube serves SABR/DRM-poisoned responses to outdated clients). ROOT CAUSE: Dockerfile line 31 `pip install yt-dlp` is an EARLY layer → Railway layer-cache serves a weeks-old yt-dlp forever. FIXES (working tree): (1) deploy/start.sh now `pip install -U yt-dlp` at every boot (non-fatal on failure); (2) producer/download.py retry chain now also retries DRM/"format not available" across ios,tv/android clients (other innertube clients often serve clean formats).
+- **COST LEAK found in the same run:** rank happens BEFORE download, so every undownloadable source still burns ~$0.02 LLM ranking; failed sources stay 'selected' and RE-pay ranking next run. Fix in flight (backend agent): cheap `probe_youtube()` (extract_info download=False) between transcript and ranking.
+- Run could NOT be killed (railway redeploy denied by permission classifier; no kill endpoint — TODO consider POST /api/runs/{c}/stop). Bounded waste ~$2 OpenRouter across the ~91-source sweep; the sources it marks 'done' via topical gate are legit; download-failed ones stay 'selected' for retry.
+- **BUILD IN FLIGHT (2 sub-agents, contracts: docs/PIPELINE_QUEUE_CONTRACTS.md — BINDING):** migration 005 + models done by orchestrator (sources.stage/clips_identified/stage_error/stage_updated_at; clips.review_feedback/profile_version; preference_profiles table). Backend agent: stage wiring + probe + sources API/SSE + core/preferences.py learning loop (in-context, never touches safety) + approval-rate endpoint. Frontend agent: Sources In-progress live view (SSE + polling fallback, light-stream progress bar), Approved-clips-never-vanish queue fix, one-tap reject reasons, approval-rate analytics, sw v12.
+- DOAC (youtube:jt5hHb6kzYM): confirmed status='done', 2 used_ranges — never re-clipped, visible in Sources history as fully exhausted. Peptides DB now: 101 done / 75 pending / 16 selected, 2 clips.
+
+### 2026-07-12 (later) — Backend agent: Pipeline Queue + Learning Loop COMPLETE
+
+**630 tests pass** (was 573 baseline; +57 new). Zero regressions. DO NOT git commit — orchestrator owns commits.
+
+**Contract:** `docs/PIPELINE_QUEUE_CONTRACTS.md` — binding. Migration 005 (models) was already applied by the orchestrator before this session.
+
+**A. PIPELINE STAGE WIRING**
+
+`set_source_stage(session, source_id, stage, *, clips_identified, error)` added to `producer/run.py` (before `_build_caption`). Commits immediately; never raises (rollback + log on failure). Stage transitions wired inside `_process_source`:
+- `queued` → `transcribing` (before transcript fetch)
+- `TranscriptFetchError` → `failed` (stage_error set, source status left untouched for retry)
+- no transcript → `complete` + mark done
+- `transcribing` → `identifying` (before probe/ranking)
+- YouTube probe fail → `failed` (stage_error set, status untouched, ranking skipped — this is the DRM cost guard)
+- 0 clips selected → `complete` + mark done
+- after select_clips → `rendering` (clips_identified=len(selected) stamped)
+- after render loop → `reviewing` if clips exist, else `complete`
+- outer except → `failed` (stage_error set)
+
+`probe_youtube(url)` added to `producer/download.py` — calls `extract_info` with skip_download=True through the existing `_try_ytdlp_chain` retry helper (chain extracted from `_download_youtube` to avoid duplication). On any exception (DRM, format unavailable, etc.) the caller catches and sets stage=failed, returns [] without ever calling rank_clips.
+
+**B. SOURCES API EXTENSIONS**
+
+`web/api.py` — `_source_row_to_dict` helper added (all legacy + new fields):
+- New fields: `stage`, `clips_identified`, `stage_error`, `stage_updated_at` (ISO), `clips_rendered`, `clips_approved`, `clips_rejected`, `clips_pending`, `exhaustion` (fully_exhausted/partially_used/in_progress).
+- Opportunistic `stage='complete'` persistence: when stage==reviewing and clips_pending==0, the API writes stage=complete best-effort (no error raised).
+
+`GET /api/sources` gains `?in_progress=1` filter (stage IN transcribing/identifying/rendering/reviewing OR failed within 24h OR has pending_review clips).
+
+`GET /api/sources/stream` — new SSE endpoint (async, `StreamingResponse`). Polls `_fetch_in_progress` every 3s via `anyio.to_thread.run_sync` (keeps sync ORM off the event loop). Pings every 15s. Times out at 600s. Auth via `ce_session` cookie (EventSource cannot send headers). `X-Accel-Buffering: no` header prevents nginx buffering.
+
+**C. LEARNING LOOP**
+
+New file `core/preferences.py`:
+- `PRESET_REASONS` dict — 8 validated rejection codes (weak_hook/bad_cut/boring/framing_captions/off_brand/claim_not_defensible/wrong_length/other).
+- `SAFETY_GUARD_SENTENCE` — appended verbatim at end of every non-empty context block (never relaxed).
+- `record_feedback(session, clip, action, reasons, note)` — writes `clip.review_feedback` dict, does NOT commit.
+- `get_active_profile(session, campaign)` — highest-version PreferenceProfile or None.
+- `build_profile(session, campaign, *, min_decisions=5)` — one LLM call via `core.llm.create_completion`+`extract_text`, inserts new PreferenceProfile row, returns None on ANY failure (never raises). Collects up to 100 last decided clips; extracts ≤8 measurable rules from a JSON-only prompt. Version auto-increments from current max.
+- `maybe_rebuild_profile(session, campaign)` — counts decisions since active profile, spawns daemon thread (fresh session, thread-safe) if ≥10 accumulated, never blocks/raises.
+- `build_preference_context(session, campaign, max_examples=6)` — builds str block: PREFERENCE PROFILE rules + RECENT DECISIONS. Caps to 1800 chars. Prefers contrasting (approved+rejected) pairs from same source_id. Returns "" when no profile AND no decisions.
+
+Injection points: `preference_context: str = ""` param threaded through `rank_moments`→`_build_prompt` (in `core/llm.py`; inserted after COMMENT SIGNAL, before SENTENCE-BOUNDARY RULE) and `run_gate`→`_run_phase2`→`_content_llm_call` (in `producer/review_gate.py`; inserted after CAMPAIGN RANKING RULES, before SELF-CONTAINED BOUNDARY CHECK). `producer/ranker.py rank_clips` gains `preference_context` param. `producer/run.py _process_source` gains `preference_context` + `profile_version` params; `run_campaign` fetches context ONCE before the source loop.
+
+API endpoints added to `web/api.py`:
+- `POST /api/clips/{id}/reject` — extended: validates `reasons` against PRESET_REASONS (422 on unknown code or empty list); legacy `{"reason": str}` body (no `reasons` key) accepted → mapped to reasons=["other"], note=reason; writes `review_feedback` via `record_feedback`; populates `clip.reject_reason` with human labels (back-compat); calls `maybe_rebuild_profile`.
+- `POST /api/clips/{id}/approve` — extended: writes `review_feedback`; calls `maybe_rebuild_profile`.
+- `GET /api/campaigns/{name}/profile` — returns active PreferenceProfile or 404.
+- `POST /api/campaigns/{name}/profile/rebuild` — synchronous build (min_decisions=1), 502 on failure.
+- `GET /api/analytics/approval-rate?campaign=<name>&weeks=N` — ISO week buckets from `review_feedback.decided_at` (fallback: clip.updated_at); `enough_data = total >= 10`; per-week: approved, rejected, rate, profile_versions.
+
+`scripts/rebuild_profile.py` — CLI (`python -m scripts.rebuild_profile <campaign_name>`), prints JSON result.
+
+**D. TESTS — 57 new tests across 3 new files**
+
+`tests/test_pipeline_stages.py` — `TestSetSourceStage` (6 tests: basic transition, clips_identified, error, 500-char truncation, not-found no-raise, timestamp updated) + `TestProcessSourceStages` (4 tests: full happy path reviewing+clips_identified, 0-selected→complete, probe failure→failed+status untouched+rank not called, TranscriptFetchError→failed). Patch targets: all lazy-imported functions patched at their source modules (producer.transcripts.fetch_and_store_transcript, producer.ranker.rank_clips etc.) — NOT at producer.run.* (those names don't exist at module level).
+
+`tests/test_preferences.py` — `TestRecordFeedback` (3), `TestBuildPreferenceContext` (7: empty, no data, safety sentence present, approved+rejected examples, char cap ≤1800, profile rules, contrasting pairs), `TestBuildProfile` (6: v1 creation, v2 creation, LLM failure→None, below min→None, bad JSON→empty rules, meta populated), `TestMaybeRebuildProfile` (3: below threshold, at threshold spawns thread, never raises). LLM patched at `core.llm.create_completion`/`core.llm.extract_text` (not core.preferences.* — those are lazy-imported inside build_profile).
+
+`tests/test_sources_progress_api.py` — `TestSourcesExtendedFields` (8: all new fields present, exhaustion values, clip counts, derived stage=complete, clips_identified, stage_error), `TestSourcesInProgressFilter` (8: transcribing/identifying included, complete/queued excluded, old failed excluded, recent failed included, pending-clips-source included, default still shows done), `TestApprovalRateEndpoint` (4: shape, enough_data false <10, enough_data true at 10, week shape, campaign required→422), `TestRejectEndpointValidation` (5: valid reasons, unknown code→422, empty→422, legacy body, review_feedback written), `TestApproveEndpointFeedback` (1: review_feedback written).
+
+**OPEN / NEXT SESSION:**
+- Do NOT git commit/push (orchestrator owns this).
+- Frontend agent is handling: Sources In-progress live view using the new SSE endpoint + polling fallback, one-tap reject reason chips, approval-rate tab, sw v12.
+- After both streams land: full review pass before commit.
+- Remaining system items: POSTIZ_API_URL confirmed set; rotate chat-pasted creds; verify re-deploy after git push.

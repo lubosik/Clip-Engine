@@ -256,6 +256,7 @@ def _content_llm_call(
     transcript_text: str,
     ranking_rules: str,
     next_context: str = "",
+    preference_context: str = "",
 ) -> dict[str, Any]:
     """Score the clip content on the §6c 10-question rubric + §7 safety list.
 
@@ -267,6 +268,10 @@ def _content_llm_call(
         "safety": {unsafe_diet_content, medical_claims, harmful_content,
                    guideline_violation}
       }
+
+    preference_context: optional learned-preference block (contract §6).
+    Injected AFTER the campaign ranking rules and BEFORE the safety check.
+    The SAFETY CHECK section itself is never moved or modified.
 
     Raises RuntimeError if LLM_API_KEY / LLM_MODEL are not set.
     """
@@ -299,6 +304,12 @@ text is NOT part of the clip):
         else ""
     )
 
+    # Preference block: injected after campaign ranking rules, before safety check.
+    # The SAFETY CHECK section is never moved or modified.
+    pref_section = ""
+    if preference_context and preference_context.strip():
+        pref_section = f"\n\n{preference_context.strip()}"
+
     prompt = f"""You are a viral short-form content quality analyst.
 
 CLIP HOOK:
@@ -308,7 +319,7 @@ TRANSCRIPT EXCERPT (this is the full spoken content of the clip):
 {transcript_text or '(no transcript)'}
 
 CAMPAIGN RANKING RULES:
-{ranking_rules or 'Default: prefer useful, interesting, standalone moments.'}{next_section}
+{ranking_rules or 'Default: prefer useful, interesting, standalone moments.'}{next_section}{pref_section}
 
 SELF-CONTAINED BOUNDARY CHECK (critical): A good clip is ONE complete idea. It \
 must start on a complete thought and END where that thought RESOLVES — it must NOT \
@@ -748,6 +759,7 @@ def run_gate(
     transcript_segments: list[dict] | None,
     campaign_cfg: Any,
     session: Any,
+    preference_context: str = "",
 ) -> GateResult:
     """Run the two-phase AI review gate on a rendered clip.
 
@@ -759,6 +771,8 @@ def run_gate(
         campaign_cfg:        CampaignConfig for ranking_rules and campaign name.
         session:             Active SQLAlchemy session (not used for writes here;
                              the caller commits gate results).
+        preference_context:  optional learned-preference block (contract §6).
+                             Injected into Phase 2 prompt after ranking rules.
 
     Returns:
         GateResult(gate_status, gate_reasons, formula_score).
@@ -835,7 +849,8 @@ def run_gate(
     # ── Phase 2: Content ──────────────────────────────────────────────────────
     try:
         gate_status, formula_score, all_reasons = _run_phase2(
-            clip_row, transcript_segments, campaign_cfg, phase1_reasons
+            clip_row, transcript_segments, campaign_cfg, phase1_reasons,
+            preference_context=preference_context,
         )
     except Exception as exc:
         log.warning("Gate Phase 2 transport error for clip %s: %s", clip_id, exc)
@@ -933,11 +948,14 @@ def _run_phase2(
     transcript_segments: list[dict] | None,
     campaign_cfg: Any,
     phase1_reasons: list[dict[str, Any]],
+    preference_context: str = "",
 ) -> tuple[str, float, list[dict[str, Any]]]:
     """Execute Phase 2 content scoring.
 
     Returns (gate_status, formula_score, all_reasons).
     Raises on transport errors so run_gate can return 'pending'.
+
+    preference_context: optional learned-preference block (contract §6).
     """
     hook = getattr(clip_row, "hook", "") or ""
     start = getattr(clip_row, "start", None)
@@ -962,7 +980,10 @@ def _run_phase2(
     except Exception:
         pass
 
-    verdict = _content_llm_call(hook, transcript_text, ranking_rules, next_context)
+    verdict = _content_llm_call(
+        hook, transcript_text, ranking_rules, next_context,
+        preference_context=preference_context,
+    )
     formula_score, content_reasons = _score_content_verdict(
         verdict, relaxed_safety_checks=relaxed_checks
     )

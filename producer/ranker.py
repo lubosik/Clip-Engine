@@ -168,14 +168,18 @@ def rank_clips(
     transcript: list[dict],
     comment_summary: str | None,
     cfg: "RankingConfig",
+    preference_context: str = "",
 ) -> list[dict]:
     """
     Call the LLM to rank transcript moments.
 
     Args:
-        transcript:      [{start, end, text}]
-        comment_summary: optional comment signal string
-        cfg:             RankingConfig
+        transcript:          [{start, end, text}]
+        comment_summary:     optional comment signal string
+        cfg:                 RankingConfig
+        preference_context:  optional learned-preference block injected into the
+                             ranking prompt (from core.preferences.build_preference_context).
+                             Pass "" to omit (default — backwards-compatible).
 
     Returns:
         LLM-ranked candidates [{start, end, score, hook, reason}]
@@ -189,4 +193,5 @@ def rank_clips(
         comment_summary=comment_summary,
         clip_len=(cfg.clip_length[0], cfg.clip_length[1]),
         max_clips=cfg.max_clips_per_source,
+        preference_context=preference_context,
     )

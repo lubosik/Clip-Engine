@@ -124,6 +124,22 @@ class TestApifyCostTracking:
             assert row.cost_usd == pytest.approx(0.031)
             assert row.status == "SUCCEEDED"
 
+    def test_null_cost_falls_back_to_published_rate(self, sqlite_db):
+        """Pay-per-event actors settle charges async — usageTotalUsd is often
+        null at call() time. Known actors fall back to items * published rate
+        so the ledger never under-reports to $0."""
+        from core.db import get_session
+        from core.models import ApifyRun
+
+        run = {"id": "r-est", "status": "SUCCEEDED", "defaultDatasetId": "d1"}
+        apify = _make_apify(run, [{"t": 1}, {"t": 2}])
+        apify.run("pintostudio/youtube-transcript-scraper", {}, kind="transcript")
+        assert apify.total_cost_usd == pytest.approx(0.02)  # 2 items * $0.01
+        with get_session() as session:
+            row = session.query(ApifyRun).filter_by(run_id="r-est").one()
+            assert row.cost_usd == pytest.approx(0.02)
+            assert "(est)" in row.status
+
     def test_real_record_ledger_swallows_db_errors(self, monkeypatch):
         """_record_ledger itself must never raise, even with no DB at all."""
         from core.apify import Apify

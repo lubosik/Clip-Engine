@@ -20,6 +20,7 @@ Design decisions documented here:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -30,6 +31,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import anyio
+import anyio.to_thread
 import yaml as _yaml
 
 from fastapi import (
@@ -39,10 +42,11 @@ from fastapi import (
     Form,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from sqlalchemy import func as sa_func
@@ -556,6 +560,89 @@ def get_campaign(name: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# /api/campaigns/{name}/profile and /api/campaigns/{name}/profile/rebuild
+# ---------------------------------------------------------------------------
+
+@app.get("/api/campaigns/{name}/profile", dependencies=[Depends(require_auth)])
+def get_campaign_profile(name: str) -> dict[str, Any]:
+    """GET /api/campaigns/{name}/profile — return the active preference profile.
+
+    Returns 404 if no profile has been built yet for this campaign.
+    Shape: {campaign, version, rules: [...], created_at, meta: {...}}
+    """
+    _db_required()
+
+    try:
+        from core.preferences import get_active_profile
+        with get_session() as session:
+            profile = get_active_profile(session, name)
+        if profile is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": f"No preference profile for campaign {name!r} yet", "code": 404},
+            )
+        created_at = profile.created_at
+        if isinstance(created_at, datetime) and created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        return {
+            "campaign": profile.campaign,
+            "version": profile.version,
+            "rules": profile.rules or [],
+            "created_at": created_at.isoformat() if isinstance(created_at, datetime) else None,
+            "meta": profile.meta or {},
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("get_campaign_profile failed campaign=%s: %s", name, exc, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to load profile", "code": 500},
+        )
+
+
+@app.post("/api/campaigns/{name}/profile/rebuild", dependencies=[Depends(require_auth)])
+def rebuild_campaign_profile(name: str) -> dict[str, Any]:
+    """POST /api/campaigns/{name}/profile/rebuild — build a new profile version.
+
+    Makes one synchronous LLM call.  Returns 502 if the LLM call fails so the
+    caller can retry without confusion (no partial row is written on failure).
+    """
+    _db_required()
+
+    try:
+        from core.preferences import build_profile
+        with get_session() as session:
+            profile = build_profile(session, name, min_decisions=1)
+        if profile is None:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "Profile build failed (LLM error or insufficient decisions)",
+                    "code": 502,
+                },
+            )
+        created_at = profile.created_at
+        if isinstance(created_at, datetime) and created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        return {
+            "campaign": profile.campaign,
+            "version": profile.version,
+            "rules": profile.rules or [],
+            "created_at": created_at.isoformat() if isinstance(created_at, datetime) else None,
+            "meta": profile.meta or {},
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("rebuild_campaign_profile failed campaign=%s: %s", name, exc, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to rebuild profile", "code": 500},
+        )
+
+
+# ---------------------------------------------------------------------------
 # /api/campaigns/{name}/engines  and  /api/campaigns/{name}/mode  (PATCH)
 # ---------------------------------------------------------------------------
 
@@ -1041,7 +1128,11 @@ def approve_clip(
     clip_id: str,
     body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """POST /api/clips/{id}/approve — approve a clip, optionally overriding caption."""
+    """POST /api/clips/{id}/approve — approve a clip, optionally overriding caption.
+
+    Also writes structured review_feedback and triggers a preference profile
+    rebuild check (contract §3, §4).
+    """
     _db_required()
 
     try:
@@ -1055,7 +1146,31 @@ def approve_clip(
             if body and isinstance(body, dict) and "caption" in body:
                 clip.caption = body["caption"]
             clip.status = "approved"
+
+            # Learning loop: record structured feedback
+            try:
+                from core.preferences import record_feedback, maybe_rebuild_profile
+                record_feedback(session, clip, "approved", [], None)
+                campaign_name = clip.campaign or ""
+            except Exception as fb_exc:
+                logger.warning(
+                    "approve_clip: record_feedback failed (non-fatal): %s", fb_exc
+                )
+                campaign_name = ""
+
             session.commit()
+
+            # Trigger background profile rebuild if threshold is met
+            if campaign_name:
+                try:
+                    from core.preferences import maybe_rebuild_profile
+                    with get_session() as pref_session:
+                        maybe_rebuild_profile(pref_session, campaign_name)
+                except Exception as rb_exc:
+                    logger.warning(
+                        "approve_clip: maybe_rebuild_profile failed (non-fatal): %s", rb_exc
+                    )
+
             return {"status": "approved", "id": clip_id}
     except HTTPException:
         raise
@@ -1072,8 +1187,55 @@ def reject_clip(
     clip_id: str,
     body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """POST /api/clips/{id}/reject — reject a clip with optional reason."""
+    """POST /api/clips/{id}/reject — reject a clip with preset reason codes.
+
+    Body options:
+      {"reasons": ["weak_hook", ...], "note": "optional"}  — new structured path
+      {"reason": "free text"}                               — legacy path (mapped to
+                                                              reasons=["other"], note=text)
+
+    Validates reason codes against PRESET_REASONS (contract §4).
+    Returns 422 when reasons is present but empty or contains unknown codes.
+    Writes structured review_feedback and triggers profile rebuild check.
+    """
     _db_required()
+
+    from core.preferences import PRESET_REASONS
+
+    body = body or {}
+
+    # Determine reasons + note from body
+    has_structured = "reasons" in body
+    has_legacy = "reason" in body and not has_structured
+
+    if has_legacy:
+        # Legacy body: {"reason": "free text"} → map to reasons=["other"], note=text
+        reasons: list[str] = ["other"]
+        note: str | None = str(body.get("reason") or "").strip() or None
+    elif has_structured:
+        raw_reasons = body.get("reasons")
+        if not isinstance(raw_reasons, list) or len(raw_reasons) == 0:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "reasons must be a non-empty list of preset codes", "code": 422},
+            )
+        # Validate each code
+        unknown = [r for r in raw_reasons if r not in PRESET_REASONS]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": f"Unknown reason code(s): {unknown}. "
+                             f"Valid codes: {list(PRESET_REASONS)}",
+                    "code": 422,
+                },
+            )
+        reasons = [str(r) for r in raw_reasons]
+        note = str(body.get("note") or "").strip() or None
+    else:
+        # Body is empty or has no recognised keys — treat as legacy with no reason
+        reasons = []
+        note = None
 
     try:
         with get_session() as session:
@@ -1084,9 +1246,37 @@ def reject_clip(
                     detail={"error": f"Clip {clip_id} not found", "code": 404},
                 )
             clip.status = "rejected"
-            if body and isinstance(body, dict):
-                clip.reject_reason = body.get("reason", "")
+
+            # Back-compat reject_reason: human-readable join of labels + note
+            reason_labels = [PRESET_REASONS.get(r, r) for r in reasons]
+            reject_reason_str = "; ".join(reason_labels)
+            if note:
+                reject_reason_str = f"{reject_reason_str}; {note}" if reject_reason_str else note
+            clip.reject_reason = reject_reason_str or None
+
+            # Learning loop: record structured feedback
+            campaign_name = clip.campaign or ""
+            try:
+                from core.preferences import record_feedback
+                record_feedback(session, clip, "rejected", reasons, note)
+            except Exception as fb_exc:
+                logger.warning(
+                    "reject_clip: record_feedback failed (non-fatal): %s", fb_exc
+                )
+
             session.commit()
+
+            # Trigger background profile rebuild if threshold is met
+            if campaign_name:
+                try:
+                    from core.preferences import maybe_rebuild_profile
+                    with get_session() as pref_session:
+                        maybe_rebuild_profile(pref_session, campaign_name)
+                except Exception as rb_exc:
+                    logger.warning(
+                        "reject_clip: maybe_rebuild_profile failed (non-fatal): %s", rb_exc
+                    )
+
             return {"status": "rejected", "id": clip_id}
     except HTTPException:
         raise
@@ -1285,6 +1475,116 @@ def get_analytics(
     ]
 
     return {"channels": channels_out, "clips": clips_out}
+
+
+@app.get("/api/analytics/approval-rate", dependencies=[Depends(require_auth)])
+def get_approval_rate(
+    campaign: str = Query(..., description="Campaign name"),
+    weeks: int = Query(default=8, ge=1, le=52),
+) -> dict[str, Any]:
+    """GET /api/analytics/approval-rate?campaign=<name>&weeks=N — approval rate by ISO week.
+
+    Uses review_feedback.decided_at for bucketing; falls back to clip.updated_at.
+    enough_data = total_decisions >= 10.
+
+    Shape:
+      {
+        "campaign": str,
+        "weeks": [{"week_start":"YYYY-MM-DD","approved":n,"rejected":n,
+                   "rate":float|null,"profile_versions":[ints]}],
+        "total_decisions": int,
+        "enough_data": bool
+      }
+    """
+    _db_required()
+
+    try:
+        with get_session() as session:
+            decided_clips = (
+                session.query(Clip)
+                .filter(
+                    Clip.campaign == campaign,
+                    Clip.review_feedback.isnot(None),
+                )
+                .order_by(Clip.updated_at.asc())
+                .all()
+            )
+    except Exception as exc:
+        logger.error("get_approval_rate DB error: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Approval rate query failed", "code": 500},
+        )
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(weeks=weeks)
+
+    # week_start_str -> {approved, rejected, profile_versions}
+    buckets: dict[str, dict[str, Any]] = {}
+
+    for clip in decided_clips:
+        fb = clip.review_feedback or {}
+        action = fb.get("action", "")
+        if action not in ("approved", "rejected"):
+            continue
+
+        # Determine decided_at timestamp
+        decided_at_raw = fb.get("decided_at")
+        decided_at: datetime | None = None
+        if decided_at_raw:
+            try:
+                decided_at = datetime.fromisoformat(str(decided_at_raw))
+                if decided_at.tzinfo is None:
+                    decided_at = decided_at.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                pass
+        if decided_at is None:
+            decided_at = clip.updated_at
+            if isinstance(decided_at, datetime) and decided_at.tzinfo is None:
+                decided_at = decided_at.replace(tzinfo=timezone.utc)
+
+        if decided_at is None or decided_at < cutoff:
+            continue
+
+        # ISO week bucket (Monday of the week)
+        week_start = decided_at - timedelta(days=decided_at.weekday())
+        week_key = week_start.strftime("%Y-%m-%d")
+
+        if week_key not in buckets:
+            buckets[week_key] = {"approved": 0, "rejected": 0, "profile_versions": set()}
+
+        if action == "approved":
+            buckets[week_key]["approved"] += 1
+        else:
+            buckets[week_key]["rejected"] += 1
+
+        pv = getattr(clip, "profile_version", None)
+        if pv is not None:
+            buckets[week_key]["profile_versions"].add(int(pv))
+
+    # Serialise
+    weeks_out: list[dict[str, Any]] = []
+    total_decisions = 0
+    for week_key in sorted(buckets):
+        b = buckets[week_key]
+        approved = b["approved"]
+        rejected = b["rejected"]
+        total = approved + rejected
+        total_decisions += total
+        rate: float | None = round(approved / total, 4) if total > 0 else None
+        weeks_out.append({
+            "week_start": week_key,
+            "approved": approved,
+            "rejected": rejected,
+            "rate": rate,
+            "profile_versions": sorted(b["profile_versions"]),
+        })
+
+    return {
+        "campaign": campaign,
+        "weeks": weeks_out,
+        "total_decisions": total_decisions,
+        "enough_data": total_decisions >= 10,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1577,21 +1877,115 @@ def _source_thumbnail_url(source: Any) -> str | None:
     return None
 
 
+def _source_row_to_dict(src: Any, *, session: Any = None) -> dict[str, Any]:
+    """Convert a Source ORM row to a JSON-serialisable dict.
+
+    Includes all legacy fields plus the new stage/clip-count fields added by
+    migration 005 (contract docs/PIPELINE_QUEUE_CONTRACTS.md §3).
+
+    When session is provided, opportunistically persists stage='complete' when
+    stage=='reviewing' and clips_pending==0 (best-effort, non-fatal).
+    """
+    clips_sorted = sorted(src.clips or [], key=lambda c: c.id)
+
+    clips_rendered = len(clips_sorted)
+    clips_approved = sum(1 for c in clips_sorted if c.status == "approved")
+    clips_rejected = sum(1 for c in clips_sorted if c.status == "rejected")
+    clips_pending = sum(1 for c in clips_sorted if c.status == "pending_review")
+
+    stage = getattr(src, "stage", "queued") or "queued"
+
+    # Derive display-stage 'complete' opportunistically (contract §2):
+    # reviewing + no pending clips = all clips have been decided.
+    if stage == "reviewing" and clips_pending == 0 and clips_rendered > 0:
+        stage = "complete"
+        if session is not None:
+            try:
+                src.stage = "complete"
+                src.stage_updated_at = datetime.now(tz=timezone.utc)
+                session.commit()
+            except Exception:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+
+    stage_updated_at_raw = getattr(src, "stage_updated_at", None)
+    stage_updated_at_str: str | None = None
+    if isinstance(stage_updated_at_raw, datetime):
+        if stage_updated_at_raw.tzinfo is None:
+            stage_updated_at_raw = stage_updated_at_raw.replace(tzinfo=timezone.utc)
+        stage_updated_at_str = stage_updated_at_raw.isoformat()
+
+    clips_list = [
+        {
+            "id": str(c.id),
+            "hook": (c.hook or "")[:160],
+            "status": c.status or "pending_review",
+            "gate_status": getattr(c, "gate_status", "pending") or "pending",
+        }
+        for c in clips_sorted
+    ]
+
+    processed_at = src.processed_at
+    if isinstance(processed_at, datetime):
+        if processed_at.tzinfo is None:
+            processed_at = processed_at.replace(tzinfo=timezone.utc)
+        processed_at = processed_at.isoformat()
+
+    src_status = src.status or "pending"
+    if src_status == "done":
+        exhaustion = "fully_exhausted"
+    elif src_status == "partially_done":
+        exhaustion = "partially_used"
+    else:
+        exhaustion = "in_progress"
+
+    return {
+        # Legacy fields (unchanged)
+        "id": src.id,
+        "source_id": src.source_id,
+        "platform": src.platform or "",
+        "url": src.url or "",
+        "title": src.title or "",
+        "author_handle": src.author_handle or "",
+        "campaign": src.campaign or "",
+        "status": src_status,
+        "processed_at": processed_at,
+        "clip_count": clips_rendered,
+        "clips": clips_list,
+        "used_ranges_count": len(src.used_ranges or []),
+        "thumbnail_url": _source_thumbnail_url(src),
+        # New pipeline-stage fields (contract §3)
+        "stage": stage,
+        "clips_identified": getattr(src, "clips_identified", None),
+        "stage_error": getattr(src, "stage_error", None),
+        "stage_updated_at": stage_updated_at_str,
+        "clips_rendered": clips_rendered,
+        "clips_approved": clips_approved,
+        "clips_rejected": clips_rejected,
+        "clips_pending": clips_pending,
+        "exhaustion": exhaustion,
+    }
+
+
 @app.get("/api/sources", dependencies=[Depends(require_auth)])
 def list_sources(
     campaign: str | None = Query(default=None),
     q: str | None = Query(default=None, description="Search title, handle, or URL (case-insensitive)"),
+    in_progress: int = Query(default=0, description="1 = only return in-flight sources"),
 ) -> list[dict[str, Any]]:
     """GET /api/sources — every source video the engine has mined.
 
-    Returns sources that are either:
-      - status != 'pending'  (they were at least selected/partially done/done), OR
-      - they have at least one Clip row (edge case: source re-queued)
+    Default (no ?in_progress): returns sources that are either status != 'pending'
+    OR have at least one Clip row (edge case: source re-queued).
+
+    ?in_progress=1: returns only in-flight sources — those whose stage is not
+    'complete' or 'queued', and not a failed source older than 24h, plus any
+    source with clips_pending > 0 regardless of stage.
 
     Sorted newest-first by COALESCE(processed_at, updated_at).
-    Each item includes clip_count + a clips list [{id, hook, status, gate_status}]
-    so the view doubles as a dedupe audit.
-    Supports ?campaign= filter and ?q= search (applied server-side, both optional).
+    Each item now includes stage/clip-count fields per contract §3.
     """
     _db_required()
 
@@ -1600,25 +1994,62 @@ def list_sources(
         from sqlalchemy.orm import selectinload
 
         with get_session() as session:
-            # Scalar subquery: source_ids that have at least one clip.
-            # Use .scalar_subquery() to avoid the SAWarning when passed to .in_()
-            has_clips_sq = (
-                session.query(Clip.source_id)
-                .filter(Clip.source_id.isnot(None))
-                .distinct()
-                .scalar_subquery()
-            )
+            if in_progress:
+                # In-progress filter (contract §3)
+                cutoff_24h = datetime.now(tz=timezone.utc) - timedelta(hours=24)
 
-            q_obj = (
-                session.query(Source)
-                .options(selectinload(Source.clips))
-                .filter(
-                    or_(
-                        Source.status != "pending",
-                        Source.source_id.in_(has_clips_sq),
+                # Subquery: sources with pending clips
+                pending_clips_sq = (
+                    session.query(Clip.source_id)
+                    .filter(
+                        Clip.source_id.isnot(None),
+                        Clip.status == "pending_review",
+                    )
+                    .distinct()
+                    .scalar_subquery()
+                )
+
+                q_obj = (
+                    session.query(Source)
+                    .options(selectinload(Source.clips))
+                    .filter(
+                        or_(
+                            # Active pipeline stages (not queued, not complete, and
+                            # not a stale failed source)
+                            or_(
+                                Source.stage.in_(
+                                    ["transcribing", "identifying", "rendering", "reviewing"]
+                                ),
+                                # Failed sources that are recent (< 24h old)
+                                (
+                                    (Source.stage == "failed")
+                                    & (Source.stage_updated_at >= cutoff_24h)
+                                ),
+                            ),
+                            # Any source with un-reviewed clips
+                            Source.source_id.in_(pending_clips_sq),
+                        )
                     )
                 )
-            )
+            else:
+                # Default filter (legacy behaviour)
+                has_clips_sq = (
+                    session.query(Clip.source_id)
+                    .filter(Clip.source_id.isnot(None))
+                    .distinct()
+                    .scalar_subquery()
+                )
+
+                q_obj = (
+                    session.query(Source)
+                    .options(selectinload(Source.clips))
+                    .filter(
+                        or_(
+                            Source.status != "pending",
+                            Source.source_id.in_(has_clips_sq),
+                        )
+                    )
+                )
 
             if campaign:
                 q_obj = q_obj.filter(Source.campaign == campaign)
@@ -1639,39 +2070,10 @@ def list_sources(
 
             sources = q_obj.all()
 
-        result: list[dict[str, Any]] = []
-        for src in sources:
-            clips_sorted = sorted(src.clips or [], key=lambda c: c.id)
-            clips_list = [
-                {
-                    "id": str(c.id),
-                    "hook": (c.hook or "")[:160],
-                    "status": c.status or "pending_review",
-                    "gate_status": getattr(c, "gate_status", "pending") or "pending",
-                }
-                for c in clips_sorted
+            result: list[dict[str, Any]] = [
+                _source_row_to_dict(src, session=session)
+                for src in sources
             ]
-            processed_at = src.processed_at
-            if isinstance(processed_at, datetime):
-                if processed_at.tzinfo is None:
-                    processed_at = processed_at.replace(tzinfo=timezone.utc)
-                processed_at = processed_at.isoformat()
-
-            result.append({
-                "id": src.id,
-                "source_id": src.source_id,
-                "platform": src.platform or "",
-                "url": src.url or "",
-                "title": src.title or "",
-                "author_handle": src.author_handle or "",
-                "campaign": src.campaign or "",
-                "status": src.status or "pending",
-                "processed_at": processed_at,
-                "clip_count": len(clips_sorted),
-                "clips": clips_list,
-                "used_ranges_count": len(src.used_ranges or []),
-                "thumbnail_url": _source_thumbnail_url(src),
-            })
 
         return result
 
@@ -1683,6 +2085,115 @@ def list_sources(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Database query failed", "code": 500},
         )
+
+
+# ---------------------------------------------------------------------------
+# /api/sources/stream — Server-Sent Events for live pipeline progress
+# ---------------------------------------------------------------------------
+
+@app.get("/api/sources/stream")
+async def stream_sources_progress(
+    request: Request,
+    _auth: None = Depends(require_auth),
+) -> StreamingResponse:
+    """GET /api/sources/stream — SSE stream of in-progress source pipeline stages.
+
+    Auth via ce_session cookie (EventSource cannot send headers).
+    - Every ~3s: event: progress + data: {"sources": [...same shape as ?in_progress=1...]}
+    - Heartbeat ': ping' every ~15s to keep the connection alive.
+    - Server closes after 10 minutes; the client should reconnect automatically.
+
+    Headers:
+        Cache-Control: no-cache
+        X-Accel-Buffering: no  (disables nginx proxy buffering)
+    """
+    _db_required()
+
+    def _fetch_in_progress() -> list[dict[str, Any]]:
+        """Sync DB query — run in a thread pool from the async generator."""
+        try:
+            from sqlalchemy import or_
+            from sqlalchemy.orm import selectinload
+
+            if get_session is None or Source is None or Clip is None:
+                return []
+
+            cutoff_24h = datetime.now(tz=timezone.utc) - timedelta(hours=24)
+
+            with get_session() as session:
+                pending_clips_sq = (
+                    session.query(Clip.source_id)
+                    .filter(
+                        Clip.source_id.isnot(None),
+                        Clip.status == "pending_review",
+                    )
+                    .distinct()
+                    .scalar_subquery()
+                )
+
+                sources = (
+                    session.query(Source)
+                    .options(selectinload(Source.clips))
+                    .filter(
+                        or_(
+                            Source.stage.in_(
+                                ["transcribing", "identifying", "rendering", "reviewing"]
+                            ),
+                            (
+                                (Source.stage == "failed")
+                                & (Source.stage_updated_at >= cutoff_24h)
+                            ),
+                            Source.source_id.in_(pending_clips_sq),
+                        )
+                    )
+                    .order_by(Source.updated_at.desc())
+                    .all()
+                )
+
+                return [_source_row_to_dict(src, session=session) for src in sources]
+
+        except Exception as exc:
+            logger.error("SSE _fetch_in_progress failed: %s", exc)
+            return []
+
+    async def _generate():
+        start_time = time.monotonic()
+        last_ping_time = start_time
+        max_duration = 600  # 10 minutes
+
+        while True:
+            now = time.monotonic()
+
+            if now - start_time >= max_duration:
+                break
+
+            # Check client disconnect (best-effort)
+            if await request.is_disconnected():
+                break
+
+            # Heartbeat every ~15s
+            if now - last_ping_time >= 15:
+                yield ": ping\n\n"
+                last_ping_time = now
+
+            # Progress data
+            try:
+                rows = await anyio.to_thread.run_sync(_fetch_in_progress)
+                payload = json.dumps({"sources": rows})
+                yield f"event: progress\ndata: {payload}\n\n"
+            except Exception as exc:
+                logger.error("SSE progress emit failed: %s", exc)
+
+            await asyncio.sleep(3)
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

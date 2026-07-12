@@ -23,6 +23,9 @@ async function _render(container, ctx) {
       <!-- Spend widget placeholder -->
       <div id="spend-widget-wrap"></div>
 
+      <!-- Approval rate block (between spend and weekly performance) -->
+      <div id="approval-rate-wrap"></div>
+
       <div id="analytics-header-row"
            style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;margin-top:8px;">
         <div class="section-title" style="margin-bottom:0">Weekly performance</div>
@@ -41,10 +44,15 @@ async function _render(container, ctx) {
 
   // Load spend + analytics in parallel
   const weeksEl = container.querySelector('#analytics-weeks');
-  weeksEl.addEventListener('change', () => _loadAnalytics(container, ctx, parseInt(weeksEl.value, 10)));
+  weeksEl.addEventListener('change', () => {
+    const w = parseInt(weeksEl.value, 10);
+    _loadAnalytics(container, ctx, w);
+    _loadApprovalRate(container, ctx, w);
+  });
 
   _loadSpend(container, ctx);
   _loadAnalytics(container, ctx, 8);
+  _loadApprovalRate(container, ctx, 8);
 }
 
 // ── Spend widget ──────────────────────────────────────────────────────────────
@@ -362,6 +370,189 @@ function _buildChart(weekly) {
     <span><strong style="color:var(--text)">${_fmt(total)}</strong> views</span>
     <span><strong style="color:var(--text)">${_fmt(totalLikes)}</strong> likes</span>
     <span><strong style="color:var(--text)">${totalPosts}</strong> posts</span>`;
+  wrap.appendChild(info);
+
+  return wrap;
+}
+
+// ── Approval rate block ───────────────────────────────────────────────────────
+
+async function _loadApprovalRate(container, ctx, weeks) {
+  const wrap = document.getElementById('approval-rate-wrap');
+  if (!wrap) return;
+
+  // Skeleton while loading
+  wrap.innerHTML = `
+    <div class="analytics-section" aria-busy="true">
+      <div class="skeleton" style="height:14px;width:180px;margin-bottom:12px;"></div>
+      <div class="skeleton" style="height:90px;width:100%;border-radius:6px;"></div>
+    </div>`;
+
+  try {
+    const data = await ctx.mockFetch(
+      // Real mode: fetch campaign list, then a rate call per campaign
+      async () => {
+        const campaigns = await ctx.api.getCampaigns();
+        const names = (Array.isArray(campaigns) ? campaigns : [])
+          .map((c) => (typeof c === 'string' ? c : c.name))
+          .filter(Boolean);
+        if (names.length === 0) return {};
+        const results = await Promise.allSettled(
+          names.map((name) =>
+            ctx.api.getApprovalRate(name, weeks).then((r) => [name, r])
+          )
+        );
+        const out = {};
+        results.forEach((r) => {
+          if (r.status === 'fulfilled') {
+            const [name, rateData] = r.value;
+            out[name] = rateData;
+          }
+        });
+        return out;
+      },
+      // Mock mode: use fixture (keyed by campaign name)
+      () => ctx.fixtures.approvalRate || {}
+    );
+
+    _paintApprovalRate(wrap, data);
+  } catch (err) {
+    if (err.status === 401) { ctx.onUnauthorized(); return; }
+    // Non-fatal: if this section fails, hide it silently
+    wrap.innerHTML = '';
+  }
+}
+
+function _paintApprovalRate(wrap, data) {
+  const entries = Object.entries(data || {});
+  if (entries.length === 0) { wrap.innerHTML = ''; return; }
+
+  wrap.innerHTML = '';
+  const section = document.createElement('div');
+  section.className = 'analytics-section';
+
+  const header = document.createElement('div');
+  header.className = 'section-title';
+  header.textContent = 'Approval rate by campaign';
+  section.appendChild(header);
+
+  entries.forEach(([name, rateData]) => {
+    section.appendChild(_buildApprovalRateCard(name, rateData));
+  });
+
+  wrap.appendChild(section);
+}
+
+function _buildApprovalRateCard(campaignName, rateData) {
+  const card = document.createElement('div');
+  card.className = 'analytics-channel-card';
+
+  const nameEl = document.createElement('div');
+  nameEl.className = 'analytics-channel-name';
+  nameEl.textContent = campaignName;
+  card.appendChild(nameEl);
+
+  if (!rateData || !rateData.enough_data) {
+    // Honest empty state
+    const needed = (rateData && rateData.needed) || 10;
+    const have   = (rateData && rateData.total_decisions) || 0;
+    const empEl  = document.createElement('div');
+    empEl.className = 'approval-rate-empty';
+    empEl.innerHTML = `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.5" stroke-linecap="round" aria-hidden="true" style="opacity:.4">
+        <circle cx="12" cy="12" r="10"/>
+        <polyline points="12 6 12 12 16 14"/>
+      </svg>
+      Not enough review decisions yet — keep reviewing
+      <span class="approval-rate-progress">(${have}/${needed})</span>`;
+    card.appendChild(empEl);
+    return card;
+  }
+
+  // Has data — build SVG bar chart of weekly approval rates
+  const weeks = Array.isArray(rateData.weeks) ? rateData.weeks : [];
+  card.appendChild(_buildApprovalRateChart(weeks, rateData.total_decisions));
+  return card;
+}
+
+function _buildApprovalRateChart(weeks, totalDecisions) {
+  const wrap = document.createElement('div');
+  wrap.className = 'bar-chart-wrap';
+
+  if (!weeks || weeks.length === 0) {
+    wrap.innerHTML = '<p class="text-muted text-small" style="padding:8px 0">No data</p>';
+    return wrap;
+  }
+
+  const W    = 340;
+  const H    = 80;
+  const barW = Math.floor((W - 20) / weeks.length) - 4;
+
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H + 28}`);
+  svg.setAttribute('aria-label', 'Weekly approval rate bar chart');
+  svg.setAttribute('role', 'img');
+
+  weeks.forEach((week, i) => {
+    const rate   = typeof week.approval_rate === 'number' ? week.approval_rate : 0;
+    const pct    = Math.min(1, Math.max(0, rate));
+    const barH   = Math.max(2, Math.floor(pct * H));
+    const x      = 10 + i * (barW + 4);
+    const y      = H - barH;
+    const isLow  = pct < 0.70; // amber if below 70%
+
+    // Background track
+    const bg = document.createElementNS(svgNS, 'rect');
+    bg.setAttribute('x', x); bg.setAttribute('y', 0);
+    bg.setAttribute('width', barW); bg.setAttribute('height', H);
+    bg.setAttribute('class', 'bar-rect-bg'); bg.setAttribute('rx', '2');
+    svg.appendChild(bg);
+
+    // Filled bar — amber when sub-70%
+    const bar = document.createElementNS(svgNS, 'rect');
+    bar.setAttribute('x', x); bar.setAttribute('y', y);
+    bar.setAttribute('width', barW); bar.setAttribute('height', barH);
+    bar.setAttribute('class', isLow ? 'bar-rect bar-rect-amber' : 'bar-rect');
+    bar.setAttribute('rx', '2');
+    svg.appendChild(bar);
+
+    // Date label
+    const dateStr = week.week_start ? _shortDate(week.week_start) : `W${i + 1}`;
+    const label = document.createElementNS(svgNS, 'text');
+    label.setAttribute('x', x + barW / 2);
+    label.setAttribute('y', H + 14);
+    label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('class', 'bar-label');
+    label.textContent = dateStr;
+    svg.appendChild(label);
+
+    // Percentage label above bar
+    if (barH > 14) {
+      const vLabel = document.createElementNS(svgNS, 'text');
+      vLabel.setAttribute('x', x + barW / 2);
+      vLabel.setAttribute('y', y - 2);
+      vLabel.setAttribute('text-anchor', 'middle');
+      vLabel.setAttribute('class', 'bar-value');
+      vLabel.textContent = `${Math.round(pct * 100)}%`;
+      svg.appendChild(vLabel);
+    }
+  });
+
+  wrap.appendChild(svg);
+
+  // Totals row
+  const totalApproved = weeks.reduce((s, w) => s + (w.approved || 0), 0);
+  const totalRejected = weeks.reduce((s, w) => s + (w.rejected || 0), 0);
+  const overallRate   = totalDecisions > 0 ? totalApproved / (totalApproved + totalRejected) : 0;
+
+  const info = document.createElement('div');
+  info.style.cssText = 'display:flex;gap:16px;margin-top:8px;font-size:12px;color:var(--text-2)';
+  info.innerHTML = `
+    <span><strong style="color:var(--text)">${Math.round(overallRate * 100)}%</strong> avg approval</span>
+    <span><strong style="color:var(--text)">${totalApproved}</strong> approved</span>
+    <span><strong style="color:var(--text)">${totalRejected}</strong> rejected</span>`;
   wrap.appendChild(info);
 
   return wrap;

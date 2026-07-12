@@ -18,6 +18,20 @@ from core.settings import get_settings
 
 log = logging.getLogger(__name__)
 
+# Fallback per-item rates (USD, BRONZE/Starter tier, verified 2026-07-12 via
+# the Apify store API — see docs/APIFY_COSTS.md). Pay-per-event actors often
+# report usageTotalUsd=null at run-completion time (charges settle async);
+# when the re-fetch below still has no figure, estimate items * rate so the
+# spend ledger never under-reports to $0.
+_FALLBACK_ITEM_RATES: dict[str, float] = {
+    "streamers/youtube-scraper": 0.003,
+    "pintostudio/youtube-transcript-scraper": 0.01,
+    "clockworks/free-tiktok-scraper": 0.002,
+    "agentx/tiktok-transcript": 0.38,
+    "apify/instagram-scraper": 0.0023,
+    "apify/instagram-reel-scraper": 0.0023,
+}
+
 
 class Apify:
     """
@@ -101,14 +115,23 @@ class Apify:
         # .get(..., {}) default won't protect us — coerce None to {} explicitly.
         usage = run.get("usage") or {}
         cost = run.get("usageTotalUsd") or usage.get("COMPUTE_UNITS_CHARGED", None)
-        # Accumulate REAL billed spend (usageTotalUsd only — the
-        # COMPUTE_UNITS_CHARGED fallback above is a unit count, not USD).
+        # Real billed spend. Pay-per-event actors settle charges asynchronously,
+        # so usageTotalUsd is often null in the call() response — re-fetch the
+        # run record once (charges are usually visible seconds later).
         cost_usd: float | None = None
         try:
             raw_usd = run.get("usageTotalUsd")
+            if raw_usd is None and run_id != "unknown":
+                try:
+                    refreshed = client.run(run_id).get()
+                    if refreshed is not None:
+                        if not isinstance(refreshed, dict):
+                            refreshed = refreshed.model_dump(by_alias=True)
+                        raw_usd = refreshed.get("usageTotalUsd")
+                except Exception:  # noqa: BLE001 - refresh is best-effort
+                    pass
             if raw_usd is not None:
                 cost_usd = float(raw_usd)
-                self.total_cost_usd += cost_usd
         except (TypeError, ValueError):
             cost_usd = None
         self.runs_count += 1
@@ -164,6 +187,17 @@ class Apify:
             extra={"actor": actor_id, "run_id": run_id, "items": len(items)},
         )
 
+        # Fall back to the published per-item rate when the API never reported
+        # a figure — an unrecorded $0 would silently under-count real spend.
+        status = run.get("status")
+        if cost_usd is None:
+            rate = _FALLBACK_ITEM_RATES.get(actor_id)
+            if rate is not None:
+                cost_usd = round(len(items) * rate, 6)
+                status = f"{status or 'OK'} (est)"
+        if cost_usd is not None:
+            self.total_cost_usd += cost_usd
+
         self._record_ledger(
             run_id=run_id,
             actor_id=actor_id,
@@ -171,7 +205,7 @@ class Apify:
             kind=kind,
             items=len(items),
             cost_usd=cost_usd,
-            status=run.get("status"),
+            status=status,
         )
         return items
 

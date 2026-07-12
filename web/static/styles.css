@@ -2860,3 +2860,515 @@ details[open] .source-clips-summary::before {
     aspect-ratio: 16 / 9;
   }
 }
+
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   NEW — Source Pipeline Queue + Learning Loop (Phase 8 additions)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+
+/* ── Sources view — two-section layout ─────────────────────────────────────── */
+
+.sources-section {
+  margin-bottom: 24px;
+}
+
+.sources-section-header {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--text-3);
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.sources-inprogress-list,
+.sources-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 24px;
+}
+
+.sources-history-header {
+  margin-bottom: 12px;
+}
+
+.sources-inprogress-empty {
+  padding: 12px 0;
+  font-size: 13px;
+}
+
+.sources-empty {
+  text-align: center;
+  padding: 32px 16px;
+  color: var(--text-3);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.sources-loading {
+  padding: 10px 0;
+  font-size: 13px;
+}
+
+
+/* ── Source in-progress card additions ──────────────────────────────────────── */
+
+/* Failed sources — amber glass */
+.source-card--failed {
+  border-color: var(--amber-border);
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.55),
+    0 0 20px rgba(255, 180, 84, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* Light-stream progress bar */
+.source-stage-bar-track {
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.07);
+  border-radius: 2px;
+  overflow: hidden;
+  margin: 8px 0 6px;
+  position: relative;
+}
+
+.source-stage-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  box-shadow: 0 0 6px var(--accent-glow);
+  transition: width 0.7s var(--spring);
+  position: relative;
+  overflow: hidden;
+}
+
+/* The luminous streak that slides right — "light-stream motif" */
+.source-stage-bar-streak {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 40%;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.65) 50%,
+    transparent 100%);
+  border-radius: 2px;
+  animation: barStreak 1.8s ease-in-out infinite;
+  will-change: transform;
+}
+
+@keyframes barStreak {
+  0%   { transform: translateX(-120%); opacity: 0.8; }
+  100% { transform: translateX(280%);  opacity: 0.2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .source-stage-bar-streak {
+    animation: none;
+    display: none;
+  }
+}
+
+/* "Identified N clips" helper note */
+.source-identified-note {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 4px;
+  letter-spacing: 0.1px;
+}
+
+/* Error block for failed sources */
+.source-stage-error {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-border);
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  color: var(--amber);
+  line-height: 1.5;
+}
+
+.source-error-text {
+  margin: 0;
+  word-break: break-word;
+}
+
+.source-error-details {
+  margin: 0;
+}
+
+.source-error-summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  word-break: break-word;
+  line-height: 1.5;
+  display: block;
+}
+.source-error-summary::-webkit-details-marker { display: none; }
+
+.source-error-full {
+  margin: 6px 0 0;
+  word-break: break-word;
+  color: rgba(255, 180, 84, 0.80);
+}
+
+/* Per-row clip counts in history cards */
+.source-clip-counts {
+  font-size: 11px;
+  margin-top: 4px;
+  margin-bottom: 6px;
+}
+
+/* Exhaustion chips on history cards */
+.exhaust-chip {
+  font-size: 10px;
+}
+
+
+/* ── Queue — section headers ────────────────────────────────────────────────── */
+
+.queue-section-header {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 1.1px;
+  color: var(--text-3);
+  margin: 0 0 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.queue-section-header--fail {
+  color: rgba(245, 101, 101, 0.60);
+  margin-top: 24px;
+}
+
+/* summary element used as the header for the approved <details> */
+.queue-section-header--approved {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 1.1px;
+  color: rgba(34, 212, 105, 0.65);
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(34, 212, 105, 0.12);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+.queue-section-header--approved::-webkit-details-marker { display: none; }
+
+
+/* ── Approved clips section ─────────────────────────────────────────────────── */
+
+.queue-approved-section {
+  margin-bottom: 16px;
+  animation: cardRise 0.30s var(--spring) both;
+}
+
+.queue-approved-details {
+  /* collapsible wrapper — no extra chrome needed */
+}
+
+/* Compact horizontal scroll grid of approved cards */
+.queue-approved-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.approved-clip-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(14, 14, 28, 0.78);
+  border: 1px solid rgba(34, 212, 105, 0.14);
+  border-radius: var(--r-sm);
+  padding: 9px 12px 9px 9px;
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: border-color 0.18s;
+}
+
+@media (min-width: 480px) {
+  .approved-clip-card {
+    background: rgba(12, 12, 24, 0.65);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+}
+
+.approved-card-thumb {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+  background: rgba(0, 0, 0, 0.40);
+}
+
+.approved-card-thumb-placeholder {
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.approved-card-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.approved-card-hook {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.approved-card-meta {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.approved-card-slot {
+  font-size: 10px;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+
+/* ── Queue — Didn't pass review section ─────────────────────────────────────── */
+
+.queue-fail-section {
+  margin-top: 8px;
+}
+
+.queue-cards-fail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Compact fail card — horizontal layout */
+.clip-card--fail {
+  animation: cardRise 0.35s var(--spring) both;
+}
+
+.fail-card-inner {
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  align-items: flex-start;
+}
+
+.fail-card-thumb {
+  flex-shrink: 0;
+  width: 64px;
+}
+
+.fail-card-thumb .clip-thumb--fail {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.fail-card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.fail-card-hook {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  margin-bottom: 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fail-card-meta {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.fail-why {
+  margin-bottom: 8px;
+}
+
+.fail-why-summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-3);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  padding: 2px 0;
+}
+.fail-why-summary::-webkit-details-marker { display: none; }
+
+.fail-why-reasons {
+  font-size: 11px;
+  color: rgba(245, 101, 101, 0.80);
+  line-height: 1.6;
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: rgba(245, 101, 101, 0.06);
+  border-radius: var(--r-xs);
+  border: 1px solid rgba(245, 101, 101, 0.14);
+}
+
+.fail-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+
+/* ── Reject sheet — preset chips ────────────────────────────────────────────── */
+
+.reject-sheet-label {
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--text-3);
+  margin-bottom: 10px;
+}
+
+.reject-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.reject-chip {
+  /* Large tap targets — 44px min-height recommended */
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease,
+    box-shadow 0.18s ease;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.reject-chip:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.18);
+  color: var(--text);
+}
+
+.reject-chip.selected {
+  background: rgba(245, 101, 101, 0.14);
+  border-color: rgba(245, 101, 101, 0.38);
+  color: #f87171;
+  box-shadow: 0 0 12px rgba(245, 101, 101, 0.18);
+}
+
+
+/* ── Notification banner ────────────────────────────────────────────────────── */
+
+.notif-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: rgba(0, 229, 255, 0.06);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--r-sm);
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-size: 13px;
+  color: var(--text-2);
+  animation: cardRise 0.32s var(--spring) both;
+}
+
+.notif-banner p {
+  flex: 1;
+  margin: 0;
+  min-width: 140px;
+}
+
+
+/* ── Analytics — approval rate ──────────────────────────────────────────────── */
+
+.analytics-section {
+  margin-bottom: 20px;
+}
+
+/* Amber fill for sub-70% approval rate bars */
+.bar-rect-amber {
+  fill: var(--amber);
+  opacity: 0.72;
+}
+
+/* Honest empty state when not enough data */
+.approval-rate-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--text-3);
+  padding: 10px 0 4px;
+  line-height: 1.5;
+}
+
+.approval-rate-progress {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-dim);
+  font-weight: 700;
+}
