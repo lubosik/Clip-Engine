@@ -454,7 +454,7 @@ function _buildApprovalRateCard(campaignName, rateData) {
 
   if (!rateData || !rateData.enough_data) {
     // Honest empty state
-    const needed = (rateData && rateData.needed) || 10;
+    const needed = 10; // threshold matches server-side (enough_data = total_decisions >= 10)
     const have   = (rateData && rateData.total_decisions) || 0;
     const empEl  = document.createElement('div');
     empEl.className = 'approval-rate-empty';
@@ -496,7 +496,7 @@ function _buildApprovalRateChart(weeks, totalDecisions) {
   svg.setAttribute('role', 'img');
 
   weeks.forEach((week, i) => {
-    const rate   = typeof week.approval_rate === 'number' ? week.approval_rate : 0;
+    const rate   = typeof week.rate === 'number' ? week.rate : 0;
     const pct    = Math.min(1, Math.max(0, rate));
     const barH   = Math.max(2, Math.floor(pct * H));
     const x      = 10 + i * (barW + 4);

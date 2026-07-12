@@ -453,16 +453,16 @@ def build_preference_context(
 
             lines.append("")
 
-        # ── Safety guard (verbatim, always at end) ────────────────────────
-        lines.append(SAFETY_GUARD_SENTENCE)
-
+        # Cap the profile+decisions block FIRST, then append the safety guard
+        # unconditionally — truncating after appending could cut the guard off
+        # (contract §5: the sentence must be present verbatim in every
+        # non-empty context block).
         block = "\n".join(lines)
+        budget = _MAX_CONTEXT_CHARS - len(SAFETY_GUARD_SENTENCE) - 4
+        if len(block) > budget:
+            block = block[: budget - 3] + "..."
 
-        # Hard cap to ~1800 chars
-        if len(block) > _MAX_CONTEXT_CHARS:
-            block = block[: _MAX_CONTEXT_CHARS - 3] + "..."
-
-        return block
+        return block + "\n" + SAFETY_GUARD_SENTENCE
 
     except Exception as exc:
         log.error(

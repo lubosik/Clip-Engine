@@ -58,16 +58,30 @@ class _FakeActor:
         return self._run
 
 
+class _FakeRunResource:
+    def __init__(self, run):
+        self._run = run
+
+    def get(self):
+        return self._run
+
+
 class _FakeClient:
-    def __init__(self, run, items):
+    def __init__(self, run, items, refreshed_run=None):
         self._run = run
         self._items = items
+        self._refreshed_run = refreshed_run
 
     def actor(self, actor_id):
         return _FakeActor(self._run)
 
     def dataset(self, dataset_id):
         return _FakeDataset(self._items)
+
+    def run(self, run_id):
+        if self._refreshed_run is None:
+            raise AttributeError("no run resource in this fake")
+        return _FakeRunResource(self._refreshed_run)
 
 
 def _make_apify(run: dict, items: list):
@@ -123,6 +137,24 @@ class TestApifyCostTracking:
             assert row.items == 3
             assert row.cost_usd == pytest.approx(0.031)
             assert row.status == "SUCCEEDED"
+
+    def test_null_cost_refetched_successfully(self, sqlite_db):
+        """usageTotalUsd null at call() time but present on re-fetch — the
+        settled figure must win over the fallback estimate."""
+        from core.apify import Apify
+        from core.db import get_session
+        from core.models import ApifyRun
+
+        run = {"id": "r-refetch", "status": "SUCCEEDED", "defaultDatasetId": "d1"}
+        refreshed = {**run, "usageTotalUsd": 0.037}
+        apify = Apify()
+        apify._client = _FakeClient(run, [{"t": 1}], refreshed_run=refreshed)
+        apify.run("pintostudio/youtube-transcript-scraper", {}, kind="transcript")
+        assert apify.total_cost_usd == pytest.approx(0.037)  # settled, not 1*$0.01
+        with get_session() as session:
+            row = session.query(ApifyRun).filter_by(run_id="r-refetch").one()
+            assert row.cost_usd == pytest.approx(0.037)
+            assert "(est)" not in (row.status or "")
 
     def test_null_cost_falls_back_to_published_rate(self, sqlite_db):
         """Pay-per-event actors settle charges async — usageTotalUsd is often

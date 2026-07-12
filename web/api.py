@@ -195,6 +195,13 @@ def _clip_to_dict(clip: Any, base_url: str = "") -> dict[str, Any]:
             if getattr(clip, "scheduled_at", None)
             else None
         ),
+        # Same value under its model name — the queue's Approved cards read
+        # clip.scheduled_at (contract §7)
+        "scheduled_at": (
+            getattr(clip, "scheduled_at", None).isoformat()
+            if getattr(clip, "scheduled_at", None)
+            else None
+        ),
         "created_at": created_at,
         "status": clip.status,
         # AI review gate fields (migration 003)

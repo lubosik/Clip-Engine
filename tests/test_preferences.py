@@ -190,7 +190,11 @@ class TestBuildPreferenceContext:
             db_session.commit()
 
         result = build_preference_context(db_session, "fitness")
+        from core.preferences import SAFETY_GUARD_SENTENCE
         assert len(result) <= 1800
+        # The guard sentence must SURVIVE truncation (contract §5) — the cap is
+        # applied to the profile/decisions block before the guard is appended.
+        assert SAFETY_GUARD_SENTENCE in result
 
     def test_includes_profile_rules_when_present(self, db_session):
         from core.models import PreferenceProfile
