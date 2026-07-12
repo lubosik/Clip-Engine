@@ -126,13 +126,17 @@ def _norm_ig_transcript(raw_item: dict) -> list[dict]:
 # Fetch functions (call Apify)
 # ---------------------------------------------------------------------------
 
-def fetch_youtube_transcript(url: str, apify: "Apify") -> list[dict]:
-    """Fetch and normalise YouTube transcript segments."""
+def fetch_youtube_transcript(
+    url: str, apify: "Apify", campaign: str | None = None
+) -> list[dict]:
+    """Fetch and normalise YouTube transcript segments (~$0.01/video)."""
     # pintostudio/youtube-transcript-scraper requires a single `videoUrl` string;
     # it rejects the `startUrls` list shape ("Field input.videoUrl is required").
     run_input: dict[str, Any] = {"videoUrl": url}
     try:
-        items = apify.run(ACTOR_YT_TRANSCRIPT, run_input)
+        items = apify.run(
+            ACTOR_YT_TRANSCRIPT, run_input, campaign=campaign, kind="transcript"
+        )
     except Exception as exc:
         log.error(
             "YouTube transcript fetch failed",
@@ -172,11 +176,23 @@ def fetch_youtube_transcript(url: str, apify: "Apify") -> list[dict]:
     return []
 
 
-def fetch_tiktok_transcript(url: str, apify: "Apify") -> list[dict]:
+def fetch_tiktok_transcript(
+    url: str, apify: "Apify", campaign: str | None = None
+) -> list[dict]:
     """Fetch and normalise TikTok transcript segments (costs ~$0.38/video)."""
+    # agentx/tiktok-transcript bills $0.38 PER TRANSCRIPT on Starter — 38x the
+    # YouTube transcript actor. Cheaper path (documented in docs/APIFY_COSTS.md):
+    # download the video and transcribe locally with faster-whisper.
+    log.warning(
+        "TikTok transcript actor costs ~$0.38/video — consider the local "
+        "whisper path for TikTok-heavy campaigns",
+        extra={"url": url},
+    )
     run_input: dict[str, Any] = {"postURLs": [url]}
     try:
-        items = apify.run(ACTOR_TT_TRANSCRIPT, run_input)
+        items = apify.run(
+            ACTOR_TT_TRANSCRIPT, run_input, campaign=campaign, kind="transcript"
+        )
     except Exception as exc:
         log.error(
             "TikTok transcript fetch failed",
@@ -258,6 +274,7 @@ def fetch_and_store_transcript(
     apify: "Apify",
     *,
     ig_raw_item: dict | None = None,
+    campaign: str | None = None,
 ) -> list[dict]:
     """
     Fetch transcript if not already stored, persist, and return segments.
@@ -273,9 +290,9 @@ def fetch_and_store_transcript(
         return existing
 
     if platform == "youtube":
-        segments = fetch_youtube_transcript(url, apify)
+        segments = fetch_youtube_transcript(url, apify, campaign=campaign)
     elif platform == "tiktok":
-        segments = fetch_tiktok_transcript(url, apify)
+        segments = fetch_tiktok_transcript(url, apify, campaign=campaign)
     elif platform == "instagram":
         if ig_raw_item:
             segments = extract_instagram_transcript(ig_raw_item)

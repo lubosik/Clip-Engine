@@ -169,6 +169,17 @@ def _validate_moments(raw: list[Any], clip_len: tuple[int, int]) -> list[dict]:
             score = float(item["score"])
             hook = str(item.get("hook") or "")
             reason = str(item.get("reason") or "")
+            # Enforce HOOK_CAPITALISATION.md mechanically: strip em dashes,
+            # cap the strategic-caps budget, demote connectives/all-caps lines.
+            if hook:
+                from core.hook_style import enforce_hook_style
+                styled = enforce_hook_style(hook)
+                if styled != hook:
+                    log.info(
+                        "Hook style repaired",
+                        extra={"before": hook, "after": styled},
+                    )
+                    hook = styled
         except (KeyError, TypeError, ValueError) as exc:
             log.warning(
                 "Skipping malformed moment item",
@@ -236,6 +247,24 @@ SENTENCE-BOUNDARY RULE (mandatory): Choose start at the FIRST word of a sentence
 and end at the LAST word of a sentence — the clip must be a complete, coherent \
 thought that does not start or end mid-sentence. The hook must describe the point \
 made in the opening sentence.
+
+HOOK STYLE RULES (mandatory — the hook is burned on screen over the first \
+seconds of the clip; a viewer decides to stay or scroll off these words):
+- Sentence case baseline. Then put EXACTLY ONE (at most two, if the hook is \
+long) high-impact word in FULL UPPERCASE so the eye stops on it: the action \
+verb, the outcome word, or the emotional pivot (NEVER, STOP, WRONG, BANNED, \
+NOBODY, ILLEGAL). Example: "The FDA quietly BANNED the most effective peptides".
+- The capitalised word(s) must survive the strip test: reading ONLY the \
+uppercase words must still communicate the promise of the clip.
+- NEVER capitalise two adjacent words. NEVER capitalise the first word unless \
+it is a contrarian opener (STOP / NEVER). NEVER capitalise connective words \
+(the, a, you, is, to...), brand names, or numbers. Acronyms (FDA, TRT, GLP-1, \
+BPC-157) keep their normal casing and do not count as your capitalised word.
+- Keep capitalised words under 20 percent of the hook. One strong cap beats \
+two weak ones.
+- ABSOLUTE RULE: never use an em dash or en dash (— or –) anywhere in the \
+hook. Use a full stop or a comma instead.
+- The hook must read like a person talking, not a billboard.
 
 TOPIC-BOUNDARY RULE (mandatory): One clip = one complete idea. Start where a \
 self-contained thought begins and END where that thought RESOLVES — right before \

@@ -62,7 +62,9 @@ def fetch_comments(
         "commentsPerPost": max_items,
     }
     try:
-        items = apify.run(ACTOR_TIKTOK_COMMENTS, run_input, max_items=max_items)
+        items = apify.run(
+            ACTOR_TIKTOK_COMMENTS, run_input, max_items=max_items, kind="comments"
+        )
     except Exception as exc:
         log.error(
             "TikTok comment fetch failed",

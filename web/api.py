@@ -720,12 +720,79 @@ def _compute_spend_data(session: Any, months: int) -> dict[str, Any]:
         "remaining_credit_usd": round(remaining, 6),
         "by_campaign": by_campaign,
         "recent": recent,
+        "apify": _compute_apify_spend(session, since),
         "plan_note": (
             "Costs are estimates derived from recorded wall-clock duration × "
             "published Modal GPU rates (modal.com/pricing, verified 2026-07-08). "
             "Modal's billing API requires a Team or Enterprise plan — these "
-            "figures are not reconciled against actual billing."
+            "figures are not reconciled against actual billing. Apify figures "
+            "are REAL billed costs (usageTotalUsd per actor run)."
         ),
+    }
+
+
+def _compute_apify_spend(session: Any, since: datetime) -> dict[str, Any]:
+    """Aggregate the apify_runs ledger (real billed costs) since `since`.
+
+    Returns a safe empty shape when the table/model is unavailable so the
+    Modal spend payload never breaks.
+    """
+    empty = {
+        "total_usd": 0.0,
+        "runs": 0,
+        "items": 0,
+        "by_kind": [],
+        "avg_cost_per_video_usd": None,
+    }
+    try:
+        from core.models import ApifyRun
+    except ImportError:
+        return empty
+
+    try:
+        rows = (
+            session.query(ApifyRun)
+            .filter(ApifyRun.created_at >= since)
+            .all()
+        )
+    except Exception:
+        # Table may not exist yet (migration 004 not applied)
+        return empty
+
+    total = 0.0
+    items_total = 0
+    by_kind_raw: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        usd = float(r.cost_usd or 0)
+        total += usd
+        items_total += int(r.items or 0)
+        entry = by_kind_raw.setdefault(
+            r.kind or "other", {"kind": r.kind or "other", "usd": 0.0, "runs": 0, "items": 0}
+        )
+        entry["usd"] += usd
+        entry["runs"] += 1
+        entry["items"] += int(r.items or 0)
+
+    by_kind = [
+        {**v, "usd": round(v["usd"], 6)}
+        for v in sorted(by_kind_raw.values(), key=lambda x: x["usd"], reverse=True)
+    ]
+
+    # Cost per scraped video: discovery spend / discovery items — the number
+    # the operator actually asked for ("how much per video scraped?").
+    disc = by_kind_raw.get("discovery")
+    avg_per_video = (
+        round(disc["usd"] / disc["items"], 6)
+        if disc and disc["items"] > 0
+        else None
+    )
+
+    return {
+        "total_usd": round(total, 6),
+        "runs": len(rows),
+        "items": items_total,
+        "by_kind": by_kind,
+        "avg_cost_per_video_usd": avg_per_video,
     }
 
 
@@ -1321,6 +1388,7 @@ def trigger_run(
       - mode: "demo" | "production" — overrides the campaign's configured mode.
       - max_apify_spend: float USD ceiling for discovery (default 2.0).
       - max_modal_spend: float USD ceiling for render (default 2.0).
+      - force_discovery: bool — run paid discovery even with a deep DB backlog.
     A web-triggered run is NEVER uncapped: omitted caps fall back to the demo
     defaults so the spec §9 spend gate always applies.
     """
@@ -1404,6 +1472,8 @@ def trigger_run(
         cmd += ["--mode", run_mode]
     if clip_target is not None:
         cmd += ["--clip-target", str(clip_target)]
+    if bool(body.get("force_discovery")):
+        cmd += ["--force-discovery"]
 
     try:
         proc = subprocess.Popen(

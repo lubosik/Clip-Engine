@@ -573,10 +573,15 @@ _SAFETY_KEYS = [
 
 def _score_content_verdict(
     verdict: dict[str, Any],
+    relaxed_safety_checks: tuple[str, ...] | list[str] = (),
 ) -> tuple[float, list[dict[str, Any]]]:
     """Convert the content LLM verdict to (formula_score, reasons list).
 
     formula_score: average of the 10 rubric scores (0.0–1.0).
+
+    relaxed_safety_checks: safety keys (from campaign gate config) that are
+    recorded but do NOT auto-fail the clip — the flag is kept in the reason
+    string so the human reviewer still sees it.
     """
     reasons: list[dict[str, Any]] = []
 
@@ -602,20 +607,29 @@ def _score_content_verdict(
     formula_score = sum(raw_scores) / len(raw_scores) if raw_scores else 0.0
 
     # ── Safety auto-fails ────────────────────────────────────────────────
+    relaxed = set(relaxed_safety_checks or ())
     any_safety_fail = False
     for key in _SAFETY_KEYS:
         triggered = bool(safety_raw.get(key, False))
-        if triggered:
+        is_relaxed = key in relaxed
+        if triggered and not is_relaxed:
             any_safety_fail = True
+        if triggered and is_relaxed:
+            reason_text = (
+                f"SAFETY RELAXED (campaign config): {key.replace('_', ' ')} "
+                "flagged but not blocking — review manually"
+            )
+        elif triggered:
+            reason_text = f"SAFETY AUTO-FAIL: {key.replace('_', ' ')}"
+        else:
+            reason_text = f"Safety OK: {key}"
         reasons.append({
             "phase": "2",
             "check": f"safety_{key}",
-            "pass": not triggered,
-            "reason": (
-                f"SAFETY AUTO-FAIL: {key.replace('_', ' ')}"
-                if triggered
-                else f"Safety OK: {key}"
-            ),
+            # A relaxed-but-triggered check counts as PASS for gating purposes;
+            # the reason string preserves the flag for the human reviewer.
+            "pass": (not triggered) or is_relaxed,
+            "reason": reason_text,
         })
 
     # ── Self-contained boundary check ────────────────────────────────────
@@ -940,8 +954,18 @@ def _run_phase2(
     # can tell whether the clip bleeds into the first sentence of a new topic.
     next_context = _build_lookahead_slice(transcript_segments, end)
 
+    # Per-campaign safety relaxation (e.g. peptides -> medical_claims):
+    # the check still runs, but a triggered relaxed check does not auto-fail.
+    relaxed_checks: list[str] = []
+    try:
+        relaxed_checks = list(campaign_cfg.gate.relaxed_safety_checks or [])
+    except Exception:
+        pass
+
     verdict = _content_llm_call(hook, transcript_text, ranking_rules, next_context)
-    formula_score, content_reasons = _score_content_verdict(verdict)
+    formula_score, content_reasons = _score_content_verdict(
+        verdict, relaxed_safety_checks=relaxed_checks
+    )
 
     all_reasons = list(phase1_reasons) + content_reasons
 

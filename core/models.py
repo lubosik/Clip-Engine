@@ -297,6 +297,42 @@ class RenderJob(Base):
 
 
 # ---------------------------------------------------------------------------
+# apify_runs — Apify spend ledger (migration 004)
+# ---------------------------------------------------------------------------
+
+class ApifyRun(Base):
+    """One row per Apify actor run, recorded by core.apify.Apify.run().
+
+    cost_usd is the run's `usageTotalUsd` as reported by the Apify API —
+    real billed spend, not an estimate.  NULL when the actor did not report
+    a cost (the ledger row is still written for run counting).
+    Powers the apify section of /api/spend and the --max-apify-spend guard.
+    """
+
+    __tablename__ = "apify_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Apify run id ("unknown" when the API response carried none)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    actor_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    campaign: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # 'discovery' | 'transcript' | 'comments' | 'analytics' | 'other'
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="other")
+    items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_apify_runs_campaign", "campaign"),
+        Index("ix_apify_runs_created_at", "created_at"),
+        Index("ix_apify_runs_kind", "kind"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # meme_profiles — versioned meme style profiles (migration 002)
 # ---------------------------------------------------------------------------
 

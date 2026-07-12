@@ -85,6 +85,32 @@ function _paintSpend(wrap, data) {
   const pct     = budget > 0 ? Math.min(100, (mtd / budget) * 100) : 0;
   const warning = pct >= 80;
   const byCamp  = Array.isArray(data.by_campaign) ? data.by_campaign : [];
+  const apify   = data.apify || null;
+
+  // Apify section — REAL billed costs from the apify_runs ledger
+  let apifyBlock = '';
+  if (apify && (apify.runs > 0 || apify.total_usd > 0)) {
+    const kindRows = (Array.isArray(apify.by_kind) ? apify.by_kind : []).map((k) => `
+      <div class="spend-campaign-row">
+        <span class="spend-campaign-name">${_esc(k.kind)} · ${k.items} items</span>
+        <span class="spend-campaign-val">$${_fmtUsd(k.usd)}</span>
+      </div>`).join('');
+    const perVideo = apify.avg_cost_per_video_usd != null
+      ? `<div class="spend-campaign-row">
+           <span class="spend-campaign-name">avg / video scraped</span>
+           <span class="spend-campaign-val">$${_fmtUsd(apify.avg_cost_per_video_usd)}</span>
+         </div>`
+      : '';
+    apifyBlock = `
+      <div class="spend-by-campaign" style="margin-top:10px">
+        <div class="spend-campaign-row" style="font-weight:600">
+          <span class="spend-campaign-name">Apify (real billed)</span>
+          <span class="spend-campaign-val">$${_fmtUsd(apify.total_usd)}</span>
+        </div>
+        ${kindRows}
+        ${perVideo}
+      </div>`;
+  }
 
   // Per-campaign rows using existing CSS class names
   const breakdownRows = byCamp.map((row) => `
@@ -134,6 +160,8 @@ function _paintSpend(wrap, data) {
         <div class="spend-by-campaign">
           ${breakdownRows}
         </div>` : ''}
+
+      ${apifyBlock}
 
       ${recentRows ? `
         <details style="margin-top:8px">

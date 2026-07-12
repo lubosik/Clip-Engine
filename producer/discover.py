@@ -171,7 +171,7 @@ def discover_youtube(
         run_input: dict[str, Any] = {
             "searchQueries": [term],
             "maxResultsShorts": 0,
-            "maxResults": 20,
+            "maxResults": yt_cfg.results_per_search,
         }
         if yt_cfg.min_view_count:
             run_input["minViewCount"] = yt_cfg.min_view_count
@@ -180,7 +180,7 @@ def discover_youtube(
 
         log.info("YouTube search", extra={"term": term, "campaign": cfg.name})
         try:
-            items = apify.run(ACTOR_YT_SCRAPER, run_input)
+            items = apify.run(ACTOR_YT_SCRAPER, run_input, campaign=cfg.name, kind="discovery")
         except Exception as exc:
             log.error(
                 "YouTube discovery failed for search term",
@@ -201,14 +201,14 @@ def discover_youtube(
         run_input = {
             "startUrls": [{"url": channel_url}],
             "maxResultsShorts": 0,
-            "maxResults": 20,
+            "maxResults": yt_cfg.results_per_search,
         }
         if yt_cfg.min_view_count:
             run_input["minViewCount"] = yt_cfg.min_view_count
 
         log.info("YouTube channel scrape", extra={"channel": channel_url, "campaign": cfg.name})
         try:
-            items = apify.run(ACTOR_YT_SCRAPER, run_input)
+            items = apify.run(ACTOR_YT_SCRAPER, run_input, campaign=cfg.name, kind="discovery")
         except Exception as exc:
             log.error(
                 "YouTube discovery failed for channel",
@@ -251,11 +251,11 @@ def discover_tiktok(
     for profile in tt_cfg.profiles:
         run_input: dict[str, Any] = {
             "profiles": [profile],
-            "resultsPerPage": 20,
+            "resultsPerPage": tt_cfg.results_per_search,
         }
         log.info("TikTok profile scrape", extra={"profile": profile, "campaign": cfg.name})
         try:
-            items = apify.run(ACTOR_TIKTOK_SCRAPER, run_input)
+            items = apify.run(ACTOR_TIKTOK_SCRAPER, run_input, campaign=cfg.name, kind="discovery")
         except Exception as exc:
             log.error(
                 "TikTok discovery failed for profile",
@@ -271,11 +271,11 @@ def discover_tiktok(
     for hashtag in tt_cfg.hashtags:
         run_input = {
             "hashtags": [hashtag],
-            "resultsPerPage": 20,
+            "resultsPerPage": tt_cfg.results_per_search,
         }
         log.info("TikTok hashtag scrape", extra={"hashtag": hashtag, "campaign": cfg.name})
         try:
-            items = apify.run(ACTOR_TIKTOK_SCRAPER, run_input)
+            items = apify.run(ACTOR_TIKTOK_SCRAPER, run_input, campaign=cfg.name, kind="discovery")
         except Exception as exc:
             log.error(
                 "TikTok discovery failed for hashtag",
@@ -328,7 +328,7 @@ def discover_instagram(
             extra={"profile": profile, "campaign": cfg.name},
         )
         try:
-            items = apify.run(ACTOR_IG_SCRAPER, run_input)
+            items = apify.run(ACTOR_IG_SCRAPER, run_input, campaign=cfg.name, kind="discovery")
         except Exception as exc:
             log.error(
                 "Instagram scraper failed",
@@ -351,7 +351,7 @@ def discover_instagram(
             extra={"profile": profile, "campaign": cfg.name},
         )
         try:
-            reel_items = apify.run(ACTOR_IG_REEL_SCRAPER, reel_run_input)
+            reel_items = apify.run(ACTOR_IG_REEL_SCRAPER, reel_run_input, campaign=cfg.name, kind="discovery")
         except Exception as exc:
             log.error(
                 "Instagram reel scraper failed",

@@ -38,6 +38,9 @@ sources:
       - "Institute of Human Anatomy"
     min_view_count: 15000
     uploaded_within: "year"
+    # Cost dial: the YouTube scraper bills ~$0.003/result on Starter.
+    # 12 terms x 10 = ~120 results ≈ $0.36/discovery run (vs $0.72 at 20).
+    results_per_search: 10
   exclude_keywords:
     - "animation"
     - "animated"
@@ -49,6 +52,17 @@ sources:
     hashtags: ["peptides", "bpc157", "looksmaxxing", "peptidetherapy"]
   instagram:
     profiles: []
+  # Skip paid Apify discovery while >= 20 unfinished sources sit in the DB
+  # backlog (they were already paid for). --force-discovery overrides.
+  skip_discovery_backlog: 20
+
+# Peptide content is inherently health-claims-heavy — that controversy IS the
+# niche (operator decision 2026-07-12). medical_claims is recorded in
+# gate_reasons but no longer auto-fails. harmful_content, unsafe_diet_content
+# and guideline_violation remain STRICT auto-fails.
+gate:
+  relaxed_safety_checks:
+    - medical_claims
 
 ranking:
   clip_length: [18, 60]

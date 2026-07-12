@@ -127,6 +127,7 @@ def _process_source(
                 url=url,
                 apify=apify,
                 ig_raw_item=ig_raw,
+                campaign=campaign_name,
             )
         except TranscriptFetchError as exc:
             # Transient actor failure (Apify outage / usage limit) — do NOT
@@ -381,6 +382,20 @@ def _extract_view_count(meta: Any) -> int:
     return 0
 
 
+def _count_backlog_sources(session: Any, campaign_name: str) -> int:
+    """Count unfinished sources (pending/selected/partially_done) for a campaign."""
+    from core.models import Source
+
+    return (
+        session.query(Source)
+        .filter(
+            Source.campaign == campaign_name,
+            Source.status.in_(("pending", "selected", "partially_done")),
+        )
+        .count()
+    )
+
+
 def _load_backlog_sources(session: Any, campaign_name: str) -> list[dict[str, Any]]:
     """Load unfinished sources (pending/selected/partially_done) from the DB as
     candidate dicts, so a run can proceed when discovery yields nothing (e.g.
@@ -425,15 +440,20 @@ def run_campaign(
     max_modal_spend: float | None = None,
     max_apify_spend: float | None = None,
     clip_target: int | None = None,
+    force_discovery: bool = False,
 ) -> None:
     """Execute a full pipeline run for one campaign.
 
     run_mode: 'demo' or 'production' — overrides cfg.mode when set.
     max_modal_spend: abort render stage if estimated Modal cost exceeds this USD value.
-    max_apify_spend: abort after discovery if estimated Apify cost exceeds this USD value.
-        Rough rate: $0.01 per discovered item (documented approximation).
+    max_apify_spend: cap on REAL Apify spend for this run (usageTotalUsd
+        accumulated across actor runs; falls back to the $0.01/item estimate
+        only when actors report no cost). Once reached, only sources with
+        cached transcripts are processed.
     clip_target: override the number of READY clips a demo run stops at
         (defaults to DEMO_CLIP_TARGET). Ignored in production mode.
+    force_discovery: run paid Apify discovery even when the DB backlog is at
+        or above sources.skip_discovery_backlog.
     """
     from core.config import load_campaign
     from core.apify import Apify
@@ -482,26 +502,51 @@ def run_campaign(
 
     run_start = datetime.now(tz=timezone.utc)
 
-    # Stage 1: discover
-    candidates = discover_all(campaign_cfg, apify)
-    if not candidates:
-        # Do NOT abort: an Apify outage/usage-limit yields 0 candidates, but the
-        # DB may hold a backlog of unfinished sources (many with cached
-        # transcripts) that the rest of the pipeline can still process.
-        log.warning(
-            "No candidates discovered; will fall back to unfinished DB sources",
-            extra={"campaign": campaign_name},
-        )
+    # Stage 1: discover — but skip the PAID Apify discovery entirely when the
+    # DB already holds a deep backlog of unfinished sources. Those were paid
+    # for on a previous run (and many carry cached transcripts); re-scraping
+    # the same search terms re-bills every result at ~$0.003/video.
+    candidates: list[dict] = []
+    skip_discovery = False
+    backlog_threshold = campaign_cfg.sources.skip_discovery_backlog
+    if backlog_threshold and not force_discovery:
+        with get_session() as session:
+            backlog_count = _count_backlog_sources(session, campaign_name)
+        if backlog_count >= backlog_threshold:
+            skip_discovery = True
+            log.info(
+                "Skipping paid Apify discovery: %d unfinished sources already "
+                "in the DB backlog (threshold %d). Pass --force-discovery to "
+                "override.",
+                backlog_count, backlog_threshold,
+                extra={"campaign": campaign_name},
+            )
 
-    # Apify spend guard: rough estimate of cost for this discovery batch.
-    # Rate: $0.01 per discovered item (approximation documented in render_dispatch.py).
+    if not skip_discovery:
+        candidates = discover_all(campaign_cfg, apify)
+        if not candidates:
+            # Do NOT abort: an Apify outage/usage-limit yields 0 candidates, but
+            # the DB may hold a backlog of unfinished sources (many with cached
+            # transcripts) that the rest of the pipeline can still process.
+            log.warning(
+                "No candidates discovered; will fall back to unfinished DB sources",
+                extra={"campaign": campaign_name},
+            )
+
+    # Apify spend guard: prefer the REAL billed spend accumulated by the Apify
+    # wrapper (usageTotalUsd per run); fall back to the rough $0.01/item
+    # estimate only when the actors reported no cost.
     if max_apify_spend is not None:
-        apify_estimate = len(candidates) * APIFY_COST_PER_ITEM
-        if apify_estimate > max_apify_spend:
+        apify_cost = apify.total_cost_usd
+        cost_label = "real"
+        if apify_cost <= 0 and candidates:
+            apify_cost = len(candidates) * APIFY_COST_PER_ITEM
+            cost_label = "estimated"
+        if apify_cost > max_apify_spend:
             log.error(
-                "Apify spend guard triggered: discovered %d items estimated at "
-                "$%.2f exceeds --max-apify-spend $%.2f — aborting run for %s",
-                len(candidates), apify_estimate, max_apify_spend, campaign_name,
+                "Apify spend guard triggered: discovery cost $%.4f (%s) "
+                "exceeds --max-apify-spend $%.2f — aborting run for %s",
+                apify_cost, cost_label, max_apify_spend, campaign_name,
             )
             return
 
@@ -572,6 +617,21 @@ def run_campaign(
     total_ready = 0     # clips that passed the gate (gate_status=='ready')
     sources_processed = 0
     for source in to_process:
+        # Mid-run Apify cap: once REAL spend hits the ceiling, only sources
+        # with a cached transcript (zero further Apify cost) may proceed.
+        if max_apify_spend is not None and apify.total_cost_usd >= max_apify_spend:
+            from producer.transcripts import get_transcript
+            with get_session() as session:
+                has_cached = get_transcript(session, source["source_id"]) is not None
+            if not has_cached:
+                log.info(
+                    "Apify spend cap reached ($%.4f >= $%.2f); skipping source "
+                    "without cached transcript",
+                    apify.total_cost_usd, max_apify_spend,
+                    extra={"source_id": source["source_id"]},
+                )
+                continue
+
         # Each source gets its own session to isolate failures
         with get_session() as session:
             clips = _process_source(
@@ -618,6 +678,8 @@ def run_campaign(
             "clips_queued": total_clips,
             "elapsed_sec": round(elapsed, 1),
             "mode": effective_mode,
+            "apify_spend_usd": round(apify.total_cost_usd, 4),
+            "apify_runs": apify.runs_count,
         },
     )
 
@@ -648,8 +710,14 @@ def main() -> None:
         type=float,
         default=None,
         metavar="USD",
-        help="Abort after discovery if estimated Apify cost exceeds this amount (USD). "
-             "Rough rate: $0.01/item.",
+        help="Cap on real Apify spend (usageTotalUsd) for this run. Once "
+             "reached, only sources with cached transcripts are processed.",
+    )
+    parser.add_argument(
+        "--force-discovery",
+        action="store_true",
+        help="Run paid Apify discovery even when the DB backlog is at or above "
+             "sources.skip_discovery_backlog",
     )
     parser.add_argument(
         "--clip-target",
@@ -671,6 +739,7 @@ def main() -> None:
         max_modal_spend=args.max_modal_spend,
         max_apify_spend=args.max_apify_spend,
         clip_target=args.clip_target,
+        force_discovery=args.force_discovery,
     )
 
     if args.all:

@@ -29,6 +29,11 @@ class Apify:
 
     def __init__(self) -> None:
         self._client: Any = None
+        # Real billed spend (usageTotalUsd) accumulated across this instance's
+        # runs.  Runs that report no cost contribute $0 here but still bump
+        # runs_count.  The producer's --max-apify-spend guard reads this.
+        self.total_cost_usd: float = 0.0
+        self.runs_count: int = 0
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -49,6 +54,8 @@ class Apify:
         run_input: dict[str, Any],
         *,
         max_items: int | None = None,
+        campaign: str | None = None,
+        kind: str = "other",
     ) -> list[dict]:
         """
         Run an Apify actor synchronously and return all result items.
@@ -61,6 +68,9 @@ class Apify:
             actor_id:  e.g. "streamers/youtube-scraper"
             run_input: actor input dict
             max_items: optional cap on returned items (passed to iterate_items)
+            campaign:  campaign name for the spend ledger (apify_runs row)
+            kind:      spend ledger category: discovery | transcript |
+                       comments | analytics | other
 
         Returns:
             List of result dicts (error items excluded).
@@ -91,6 +101,17 @@ class Apify:
         # .get(..., {}) default won't protect us — coerce None to {} explicitly.
         usage = run.get("usage") or {}
         cost = run.get("usageTotalUsd") or usage.get("COMPUTE_UNITS_CHARGED", None)
+        # Accumulate REAL billed spend (usageTotalUsd only — the
+        # COMPUTE_UNITS_CHARGED fallback above is a unit count, not USD).
+        cost_usd: float | None = None
+        try:
+            raw_usd = run.get("usageTotalUsd")
+            if raw_usd is not None:
+                cost_usd = float(raw_usd)
+                self.total_cost_usd += cost_usd
+        except (TypeError, ValueError):
+            cost_usd = None
+        self.runs_count += 1
         log.info(
             "Apify actor run complete",
             extra={
@@ -142,4 +163,53 @@ class Apify:
             "Apify dataset collected",
             extra={"actor": actor_id, "run_id": run_id, "items": len(items)},
         )
+
+        self._record_ledger(
+            run_id=run_id,
+            actor_id=actor_id,
+            campaign=campaign,
+            kind=kind,
+            items=len(items),
+            cost_usd=cost_usd,
+            status=run.get("status"),
+        )
         return items
+
+    @staticmethod
+    def _record_ledger(
+        *,
+        run_id: str,
+        actor_id: str,
+        campaign: str | None,
+        kind: str,
+        items: int,
+        cost_usd: float | None,
+        status: str | None,
+    ) -> None:
+        """Persist one apify_runs ledger row (best-effort, never raises).
+
+        A DB failure here must never break a producer run — the run itself
+        already succeeded and its results are in hand.
+        """
+        try:
+            from core.db import get_session
+            from core.models import ApifyRun
+
+            with get_session() as session:
+                session.add(
+                    ApifyRun(
+                        run_id=run_id or "unknown",
+                        actor_id=actor_id,
+                        campaign=campaign,
+                        kind=kind,
+                        items=items,
+                        cost_usd=cost_usd,
+                        status=status,
+                    )
+                )
+                session.commit()
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "Failed to record apify_runs ledger row (run continues)",
+                extra={"actor": actor_id, "error": str(exc)},
+            )

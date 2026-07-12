@@ -380,5 +380,15 @@ export const spend = {
     { clip_id: 'mock_clip_002', campaign: 'fitness',  gpu: 't4', duration_s: 38.7, usd: 0.0063, created_at: hAgo(5)  },
     { clip_id: 'mock_meme_001', campaign: 'demo_run', gpu: 'l4', duration_s: 18.2, usd: 0.0040, created_at: hAgo(12) },
   ],
+  apify: {
+    total_usd: 0.47,
+    runs: 14,
+    items: 152,
+    by_kind: [
+      { kind: 'discovery',  usd: 0.36, runs: 12, items: 120 },
+      { kind: 'transcript', usd: 0.11, runs: 2,  items: 32  },
+    ],
+    avg_cost_per_video_usd: 0.003,
+  },
   plan_note: 'Estimates based on recorded GPU duration × published rates (modal.com/pricing). Verify in Modal dashboard.',
 };

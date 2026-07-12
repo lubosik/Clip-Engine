@@ -30,6 +30,10 @@ class YouTubeSourceConfig(BaseModel):
     channels: list[str] = Field(default_factory=list)
     min_view_count: int = 0
     uploaded_within: str = "year"  # hour|day|week|month|year
+    # Max videos requested per search term / channel scrape. The YouTube
+    # scraper bills per result (~$0.003/video on Starter), so this is a direct
+    # cost dial: 12 terms x 20 results = ~$0.72/run vs ~$0.36 at 10.
+    results_per_search: int = Field(default=20, ge=1, le=100)
     # Optional blocklist: channel name substrings to skip (case-insensitive).
     # Matched against the candidate's author_handle / channelName field.
     # Example: ["BadChannel", "spammer123"]
@@ -48,6 +52,8 @@ class YouTubeSourceConfig(BaseModel):
 class TikTokSourceConfig(BaseModel):
     profiles: list[str] = Field(default_factory=list)
     hashtags: list[str] = Field(default_factory=list)
+    # Max videos per profile/hashtag scrape (~$0.002/video on Starter).
+    results_per_search: int = Field(default=20, ge=1, le=100)
 
 
 class InstagramSourceConfig(BaseModel):
@@ -58,6 +64,11 @@ class SourcesConfig(BaseModel):
     youtube: YouTubeSourceConfig | None = None
     tiktok: TikTokSourceConfig | None = None
     instagram: InstagramSourceConfig | None = None
+    # Skip (paid) Apify discovery entirely while the campaign already has at
+    # least this many unfinished sources in the DB backlog — they were paid
+    # for once and many carry cached transcripts. 0 disables the skip.
+    # The producer's --force-discovery flag overrides this per run.
+    skip_discovery_backlog: int = Field(default=20, ge=0)
     # Cross-platform title/caption keyword blocklist (case-insensitive substring match).
     # Applied during discover_all() to filter candidates from any platform.
     # Example: ["sponsored", "ad", "promotion"]
@@ -272,6 +283,38 @@ class DemoConfig(BaseModel):
     test_channels: list[str] = Field(default_factory=list)
 
 
+_GATE_SAFETY_CHECKS = {
+    "unsafe_diet_content",
+    "medical_claims",
+    "harmful_content",
+    "guideline_violation",
+}
+
+
+class GateConfig(BaseModel):
+    """Per-campaign AI review-gate tuning.
+
+    relaxed_safety_checks: Phase-2 safety categories that are recorded but do
+    NOT auto-fail the clip for this campaign.  Use for niches whose content is
+    inherently flagged (e.g. peptides -> medical_claims) while keeping the
+    other categories strict.  The check still runs and its verdict is kept in
+    gate_reasons, so the human reviewer sees exactly what was flagged.
+    """
+
+    relaxed_safety_checks: list[str] = Field(default_factory=list)
+
+    @field_validator("relaxed_safety_checks")
+    @classmethod
+    def _valid_safety_checks(cls, v: list[str]) -> list[str]:
+        bad = [c for c in v if c not in _GATE_SAFETY_CHECKS]
+        if bad:
+            raise ValueError(
+                f"relaxed_safety_checks contains unknown checks {bad}; "
+                f"valid: {sorted(_GATE_SAFETY_CHECKS)}"
+            )
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Top-level campaign config
 # ---------------------------------------------------------------------------
@@ -293,6 +336,8 @@ class CampaignConfig(BaseModel):
     template: TemplateConfig
     destinations: DestinationsConfig
     analytics: AnalyticsConfig
+    # AI review-gate tuning (optional; defaults keep every safety check strict)
+    gate: GateConfig = Field(default_factory=GateConfig)
 
     @field_validator("mode")
     @classmethod
