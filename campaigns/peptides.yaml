@@ -132,14 +132,18 @@ template:
     style: "word_by_word"
     font: "assets/peptides/Montserrat-ExtraBold.ttf"
     base_color: "#FFFFFF"
-    highlight_color: "#00E5FF"
+    # Match the reference TikTok (operator decision 2026-07-13): ONE word at a
+    # time, plain white (no cyan highlight → highlight == base so the active
+    # word never changes colour). See style_refs/REFERENCE_TEMPLATE.md.
+    highlight_color: "#FFFFFF"
     outline_color: "#000000"
     outline_px: 6
     position: "mid_low"
-    max_words_per_line: 3
+    max_words_per_line: 1
   hook:
     enabled: true
-    show_seconds: [0, 8]
+    # Reference hook is on screen ~6s (was 8s).
+    show_seconds: [0, 6]
     source: "ranking"
     font: "assets/peptides/Montserrat-ExtraBold.ttf"
     box_color: "#FFFFFF"

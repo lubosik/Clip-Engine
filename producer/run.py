@@ -303,6 +303,51 @@ def _process_source(
         set_source_stage(session, source_id, "rendering", clips_identified=len(selected))
         session.commit()
 
+        # ── B2 Deterministic within-unit guard ──────────────────────────────────
+        # Applied BEFORE the LLM verifier: enforce each clip lies within ONE
+        # topic unit (deterministic, zero LLM cost, zero network).  Uses
+        # sentence-level boundary signals to build units; graceful no-op when
+        # sentence_spans is empty.
+        if sentence_spans:
+            from core.topics import (
+                clip_within_unit,
+                detect_unit_boundaries,
+                build_units_from_boundaries,
+            )
+            try:
+                _det_boundaries = detect_unit_boundaries(sentence_spans)
+                _det_units = build_units_from_boundaries(sentence_spans, _det_boundaries)
+                guarded: list[dict] = []
+                for _c in selected:
+                    try:
+                        _gc = clip_within_unit(
+                            _c, _det_units, sentence_spans,
+                            clip_len=(
+                                campaign_cfg.ranking.clip_length[0],
+                                campaign_cfg.ranking.clip_length[1],
+                            ),
+                        )
+                        if _gc is not _c:
+                            log.info(
+                                "clip_within_unit adjusted: source=%s "
+                                "start %.2f→%.2f end %.2f→%.2f",
+                                source_id,
+                                _c.get("start", 0), _gc.get("start", 0),
+                                _c.get("end", 0), _gc.get("end", 0),
+                            )
+                        guarded.append(_gc)
+                    except Exception as cwu_exc:
+                        log.warning(
+                            "clip_within_unit error (non-fatal, keeping original): %s",
+                            cwu_exc,
+                        )
+                        guarded.append(_c)
+                selected = guarded
+            except Exception as det_exc:
+                log.warning(
+                    "Deterministic unit detection failed (non-fatal): %s", det_exc
+                )
+
         # ── §R2.4 Pre-render boundary verification ───────────────────────────────
         # For each selected clip, run a cheap LLM boundary check BEFORE downloading
         # and rendering (saves GPU spend when boundaries are bad).

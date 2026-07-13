@@ -5,7 +5,7 @@ PYTHON  := .venv/bin/python
 PYTEST  := .venv/bin/pytest
 MODAL   := .venv/bin/modal
 
-.PHONY: healthcheck smoke demo test deploy-modal upload-hero
+.PHONY: healthcheck smoke demo test deploy-modal upload-hero eval-segmentation
 
 # ── System readiness check ──────────────────────────────────────────────────
 # Verifies Postgres, R2 (put/get/delete), Apify, Postiz, and Modal (token +
@@ -42,3 +42,10 @@ deploy-modal:
 # Required for the login page hero video to load from R2.
 upload-hero:
 	$(PYTHON) scripts/upload_hero.py
+
+# ── Offline segmentation eval harness (B4) ──────────────────────────────────
+# Runs the 4 known boundary-failure regression cases against the deterministic
+# guards.  Zero network, zero LLM, zero render spend.
+# Exits 1 if any hard assertion (sentence-boundary alignment) fails.
+eval-segmentation:
+	$(PYTHON) scripts/eval_segmentation.py --verbose

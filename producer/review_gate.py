@@ -219,6 +219,7 @@ def _vision_llm_call(
             '  "watermark_visible": true/false,\n'
             '  "real_humans": true/false,\n'
             '  "speaker_centered": true/false,\n'
+            '  "footage_in_focus": true/false,\n'
             '  "animation_detected": true/false\n'
             "}\n\n"
             "Rules:\n"
@@ -236,6 +237,12 @@ def _vision_llm_call(
             "- speaker_centered: The main speaker's head/body sits within the middle "
             "half of the frame horizontally (lenient — reject only clear off-frame "
             "drift where the speaker is cut off or hugging an edge).\n"
+            "- footage_in_focus: The real footage (the speaker/scene, NOT the burned-in "
+            "caption or watermark text) is sharp and in focus. Set to FALSE only when "
+            "the footage is clearly defocused/blurry/out-of-focus — a soft face or "
+            "unreadable scene. Smooth skin or a plain background is NOT blur; judge by "
+            "whether edges (eyes, hair, facial features) are crisp. Be lenient: reject "
+            "only clear, obvious defocus.\n"
             "- animation_detected: Set to true ONLY if footage looks animated, "
             "cartoon, or computer-generated. This is an AUTO-FAIL."
         ),
@@ -693,6 +700,7 @@ _VISION_CHECKS = [
     ("watermark_visible",           True,  "Watermark/logo visible"),
     ("real_humans",                 True,  "Real humans on camera (not animation)"),
     ("speaker_centered",            True,  "Speaker roughly centered"),
+    ("footage_in_focus",            True,  "Footage is in focus (not defocused)"),
     ("animation_detected",          False, "Animation/cartoon/CGI detected (AUTO-FAIL)"),
 ]
 
@@ -727,6 +735,8 @@ def _vision_verdict_to_reasons(verdict: dict[str, Any]) -> list[dict[str, Any]]:
                 reason_text = "Watermark/logo not detected"
             elif check_key == "real_humans" and not actual_bool:
                 reason_text = "No real humans detected on camera"
+            elif check_key == "footage_in_focus" and not actual_bool:
+                reason_text = "Footage appears clearly defocused / out of focus"
             elif check_key == "speaker_centered" and not actual_bool:
                 reason_text = "Speaker not roughly centered in frame"
         reasons.append({
@@ -1199,20 +1209,17 @@ def _run_phase1(
 
         frames = _extract_frames(local_path, timestamps)
 
-        # ── Deterministic blur check (no LLM, no network) ────────────────
-        # Must run while frames are still in scope (before the tempdir exits).
-        # This check is self-contained: cv2 import failure → pass=None (skip).
-        # A failed blur check (pass=False) is an immediate Phase 1 auto-fail
-        # and short-circuits the vision call (saves LLM cost).
+        # ── Deterministic blur metric (informational ONLY — never gates) ─────
+        # A Laplacian-variance threshold cannot reliably separate blurry from
+        # sharp on compressed talking-head footage: measured across whole clips,
+        # a genuinely-blurry clip (id 52, median 14) scores the SAME as sharp
+        # clips (id 104 = 12, id 111 = 14). As a hard gate it false-failed 14/17
+        # clips in the 2026-07-12 run. Focus is now judged by the vision LLM
+        # (footage_in_focus), which reliably tells sharp from defocused.
+        # We still record the metric for observability, but it never fails a clip.
         blur_reason = _check_frames_sharp(frames)
+        blur_reason["pass"] = None  # informational; do not gate on it
         reasons.append(blur_reason)
-        if blur_reason.get("pass") is False:
-            log.info(
-                "Phase 1 blur auto-fail for clip %s: %s",
-                getattr(clip_row, "id", "?"),
-                blur_reason["reason"],
-            )
-            return reasons, False, probe
 
     # ── Vision LLM call ───────────────────────────────────────────────────
     style_refs = _load_style_refs(campaign_name)

@@ -43,28 +43,10 @@ _TRAILING_DANGLE_RE = re.compile(
 # ---------------------------------------------------------------------------
 # §R.PART2 Req B1 — List/transition end-signal markers
 # ---------------------------------------------------------------------------
-# Sentence-START patterns that signal a list item or topic transition.
-# When a clip's last sentence begins with one of these, the end must be pulled
-# back to the prior sentence so the clip does not start the next topic.
-#
-# Examples: "Number 16, CAX" (clip-80), "Next up", "Moving on", etc.
-# Applied case-insensitively, anchored at the start of the sentence text.
-TRANSITION_START_RE = re.compile(
-    r"""^(?:
-        Number\s+\d+            # "Number 16, CAX"
-        | Number\s+[A-Z]        # "Number A", "Number B" (lettered list items)
-        | Next\s+up             # "Next up"
-        | The\s+next\s+one      # "The next one"
-        | Now\s+again           # "Now again"
-        | And\s+just\s+like     # "And just like"
-        | Also,                 # "Also,"
-        | Oh,\s+and             # "Oh, and"
-        | So\s+the\s+next       # "So the next"
-        | Moving\s+on           # "Moving on"
-        | Alright,?\s*next      # "Alright next" / "Alright, next"
-    )""",
-    re.IGNORECASE | re.VERBOSE,
-)
+# Canonical definition lives in core/topics.py (B1 canonical location).
+# Imported here so existing code + tests that reference
+# producer.boundary_check.TRANSITION_START_RE continue to work.
+from core.topics import TRANSITION_START_RE  # noqa: E402 (after stdlib imports)
 
 # Boundary-verification model preference
 _DEFAULT_BOUNDARY_MODEL = "anthropic/claude-haiku-4.5"
@@ -369,6 +351,8 @@ def _build_boundary_prompt(
     after_sentences: list[str],
 ) -> str:
     """Build the boundary verification prompt per the spec pattern."""
+    from core.fewshot import REAL_BOUNDARY_PAIRS  # local import: only needed when building the prompt
+
     before_block = (
         "\n".join(f"  {s}" for s in before_sentences)
         if before_sentences
@@ -381,8 +365,12 @@ def _build_boundary_prompt(
         else "  (end of transcript)"
     )
 
-    return f"""You are a clip boundary quality reviewer for short-form social-media clips.
+    real_pairs_section = (
+        f"\n{REAL_BOUNDARY_PAIRS}\n" if REAL_BOUNDARY_PAIRS else ""
+    )
 
+    return f"""You are a clip boundary quality reviewer for short-form social-media clips.
+{real_pairs_section}
 FEW-SHOT EXAMPLES OF CORRECT VERDICTS:
 
 Example A — LIST ITEM BLEED (clip-80, Selank):

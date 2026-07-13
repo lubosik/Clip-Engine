@@ -22,6 +22,7 @@ from core.topics import (
     _validate_topic_segments,
     snap_end_off_next_topic,
 )
+from core.fewshot import REAL_BOUNDARY_PAIRS, REFERENCE_EXEMPLAR
 
 log = logging.getLogger(__name__)
 
@@ -296,6 +297,14 @@ def _build_prompt(
             "otherwise high-quality."
         )
 
+    # Build the real-case few-shot section (B3) — compact, after the worked
+    # examples. Pairs with the reference gold-standard positive exemplar so the
+    # model has both what-good-looks-like and the real failure modes to avoid.
+    real_pairs_section = (
+        (f"\n{REFERENCE_EXEMPLAR}\n" if REFERENCE_EXEMPLAR else "")
+        + (f"\n{REAL_BOUNDARY_PAIRS}\n" if REAL_BOUNDARY_PAIRS else "")
+    )
+
     if sentence_spans:
         # ── Sentence-INDEX mode (Spotify pattern, §R2.2) ─────────────────────
         # Present numbered sentences with timestamps; ask for index-based selection.
@@ -343,6 +352,7 @@ subject. NEVER end a clip on the first sentence of a new topic. Topic completene
 wins over hitting a target length.
 
 {FEWSHOT_BOUNDARY_EXAMPLES}
+{real_pairs_section}
 
 NUMBERED SENTENCES (index [i] with timestamps):
 {span_lines}
@@ -419,7 +429,7 @@ so trim the end back to where the prior thought completed. Topic completeness wi
 over hitting a target length.
 
 {FEWSHOT_BOUNDARY_EXAMPLES}
-
+{real_pairs_section}
 TRANSCRIPT (timestamps in seconds):
 {seg_lines}
 

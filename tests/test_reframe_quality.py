@@ -758,11 +758,12 @@ class TestGateBlurIntegration:
             "format": {"duration": str(dur)},
         }
 
-    def test_defocus_fails_phase1_before_vision_call(self, monkeypatch):
-        """A defocused mid frame causes Phase 1 to fail without calling the vision LLM."""
+    def test_deterministic_blur_no_longer_gates_phase1(self, monkeypatch):
+        """The deterministic Laplacian blur metric is now INFORMATIONAL ONLY —
+        a low-detail mid frame must NOT auto-fail Phase 1 (it false-failed 14/17
+        real clips). Focus is judged by the vision LLM (footage_in_focus)."""
         from producer import review_gate
 
-        # Synthetic frames: sharp hook (index 0), blurry mid (index 1), sharp outro (2,3)
         hook_b = _frame_to_jpeg_bytes(_make_sharp_frame(1920, 1080))
         mid_b = _frame_to_jpeg_bytes(_make_blurry_frame(1920, 1080))
         outro_b = _frame_to_jpeg_bytes(_make_sharp_frame(1920, 1080))
@@ -771,9 +772,15 @@ class TestGateBlurIntegration:
         monkeypatch.setattr(review_gate, "_probe_video", lambda _: self._make_fake_probe())
         monkeypatch.setattr(review_gate, "_extract_frames", lambda *a, **kw: fake_frames)
         vision_called = []
+        good_verdict = {
+            "hook_present_in_hook_frame": True, "hook_absent_in_mid_frame": True,
+            "captions_present": True, "watermark_visible": True,
+            "real_humans": True, "speaker_centered": True,
+            "footage_in_focus": True, "animation_detected": False,
+        }
         monkeypatch.setattr(
             review_gate, "_vision_llm_call",
-            lambda *a, **kw: vision_called.append(True) or {},
+            lambda *a, **kw: (vision_called.append(True), good_verdict)[1],
         )
         monkeypatch.setattr(review_gate, "_resolve_to_local_path", lambda p, d: (p, False))
 
@@ -785,11 +792,34 @@ class TestGateBlurIntegration:
 
         reasons, passed, _ = review_gate._run_phase1(clip_row, "/fake/video.mp4", None, "fitness")
 
-        assert not passed, "Defocused clip should fail Phase 1"
-        assert any(r["check"] == "footage_sharp" and r["pass"] is False for r in reasons), (
-            "footage_sharp check should be present and failed"
-        )
-        assert len(vision_called) == 0, "Vision LLM should NOT be called after blur auto-fail"
+        # Vision WAS called (no deterministic short-circuit) and the clip passes:
+        assert len(vision_called) == 1, "Vision LLM must run — blur no longer short-circuits"
+        assert passed, "A blurry-metric clip is no longer auto-failed by the deterministic check"
+        # footage_sharp is recorded but informational (pass=None)
+        assert any(r["check"] == "footage_sharp" and r["pass"] is None for r in reasons)
+
+    def test_vision_out_of_focus_fails_phase1(self, monkeypatch):
+        """The vision LLM saying footage_in_focus=false → Phase 1 fails."""
+        from producer import review_gate
+
+        frames = [_frame_to_jpeg_bytes(_make_sharp_frame(1920, 1080))] * 4
+        monkeypatch.setattr(review_gate, "_probe_video", lambda _: self._make_fake_probe())
+        monkeypatch.setattr(review_gate, "_extract_frames", lambda *a, **kw: frames)
+        verdict = {
+            "hook_present_in_hook_frame": True, "hook_absent_in_mid_frame": True,
+            "captions_present": True, "watermark_visible": True,
+            "real_humans": True, "speaker_centered": True,
+            "footage_in_focus": False, "animation_detected": False,
+        }
+        monkeypatch.setattr(review_gate, "_vision_llm_call", lambda *a, **kw: verdict)
+        monkeypatch.setattr(review_gate, "_resolve_to_local_path", lambda p, d: (p, False))
+
+        from unittest.mock import MagicMock
+        clip_row = MagicMock(); clip_row.id = 99; clip_row.kind = "clip"; clip_row.source_id = None
+
+        reasons, passed, _ = review_gate._run_phase1(clip_row, "/fake/video.mp4", None, "fitness")
+        assert not passed, "footage_in_focus=false must fail Phase 1"
+        assert any(r["check"] == "footage_in_focus" and r["pass"] is False for r in reasons)
 
     def test_sharp_mid_does_not_fail_before_vision(self, monkeypatch):
         """A sharp mid frame does NOT auto-fail Phase 1 (vision LLM still runs)."""
@@ -820,11 +850,11 @@ class TestGateBlurIntegration:
         reasons, passed, _ = review_gate._run_phase1(clip_row, "/fake/video.mp4", None, "fitness")
 
         # Phase fails because of animation (not blur), but the vision WAS called
-        assert len(vision_called) == 1, "Vision LLM should be called when blur check passes"
-        # footage_sharp should be present with pass=True
+        assert len(vision_called) == 1, "Vision LLM should be called (blur never short-circuits)"
+        # footage_sharp is recorded but informational (pass=None, never gates)
         blur_reasons = [r for r in reasons if r["check"] == "footage_sharp"]
         assert blur_reasons, "footage_sharp reason should be in reasons list"
-        assert blur_reasons[0]["pass"] is True
+        assert blur_reasons[0]["pass"] is None
 
     def test_cv2_unavailable_does_not_block_phase1(self, monkeypatch):
         """If cv2 import fails inside _check_frames_sharp, Phase 1 continues (pass=None)."""

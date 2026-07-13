@@ -31,6 +31,45 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Transition / list-item / wrap-up / topic-opener patterns
+# ---------------------------------------------------------------------------
+# Canonical definition lives here; producer/boundary_check.py imports from here.
+# Updated with B1 additions: 'another thing', 'so anyway', 'and just like that'.
+
+TRANSITION_START_RE = re.compile(
+    r"""^(?:
+        Number\s+\d+            # "Number 16, CAX"
+        | Number\s+[A-Z]        # "Number A", "Number B" (lettered list items)
+        | Next\s+up             # "Next up"
+        | The\s+next\s+one      # "The next one"
+        | Now\s+again           # "Now again"
+        | And\s+just\s+like\s+that  # "And just like that" (topic-end cue)
+        | And\s+just\s+like     # "And just like semaglutide..." (mid-list pivot)
+        | Also,                 # "Also,"
+        | Oh,\s+and             # "Oh, and"
+        | So\s+the\s+next       # "So the next"
+        | Moving\s+on           # "Moving on"
+        | Alright,?\s*next      # "Alright next" / "Alright, next"
+        | Another\s+thing       # "Another thing" (B1 addition)
+        | So\s+anyway           # "So anyway" (B1 addition)
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Wrap-up cues: when the CURRENT sentence starts with these, it is ending a unit.
+# The NEXT sentence opens a new unit.
+_WRAP_UP_RE = re.compile(
+    r"^(?:so\s+that'?s\s+why|and\s+that'?s\s+the\s+point)\b",
+    re.IGNORECASE,
+)
+
+# Topic-opening cues: these sentence starts signal the beginning of a new unit.
+_TOPIC_OPENER_RE = re.compile(
+    r"^(?:so\s+there'?s\s+this|the\s+other\s+thing\s+is)\b",
+    re.IGNORECASE,
+)
+
 # Timestamps are linearly interpolated from segment-level transcripts, so exact
 # equality never holds; compare boundaries with this slack (seconds).
 _EPS = 0.75
@@ -164,21 +203,22 @@ def _build_segmentation_prompt(transcript: list[dict]) -> str:
         for seg in transcript
     )
     return f"""You are a transcript segmentation assistant. Split the transcript \
-below into self-contained TOPIC segments. A topic segment is one coherent thread \
+below into self-contained TOPIC UNITS. A topic unit is one coherent thread \
 of thought — a single question-and-answer, a single explanation, or a single \
 story — that begins when a subject is introduced and ends when that subject \
 resolves and a DIFFERENT subject begins.
 
-A new segment starts when ANY of these occurs:
+A new unit starts when ANY of these occurs:
 - the host asks a new question or changes the subject ("let me ask you...",
   "what about...", "so we've got X on the table...");
 - a discourse cue signals a move ("so anyway", "moving on", "the next thing",
   "another thing", "but here's the point");
 - the speaker clearly shifts to a different subject (semantic change).
 
-For each topic segment return its start second, its end second (the LAST word of
+For each topic unit return its start second, its end second (the LAST word of
 the resolving thought — NOT the first word of the next subject), a one-line
-summary, and a short note on what marks the boundary at its end.
+summary, a short note on what marks the boundary, and whether the unit is
+COMPLETE (contains setup → development → resolution).
 
 TRANSCRIPT (timestamps in seconds):
 {seg_lines}
@@ -187,10 +227,12 @@ Return ONLY a JSON array (no prose, no code fences), chronological, covering the
 whole transcript, in this exact shape:
 [
   {{
-    "start": <float seconds — first word of this topic>,
+    "start": <float seconds — first word of this topic unit>,
     "end": <float seconds — last word of the resolving thought>,
     "summary": "<one line: what this topic is about>",
-    "ends_because": "<what marks the boundary: 'host asks new question' / 'subject change to X' / 'wrap-up cue' / 'story resolves'>"
+    "boundary_reason": "<what marks the end boundary: 'host asks new question' / 'subject change to X' / 'wrap-up cue' / 'story resolves'>",
+    "ends_because": "<same as boundary_reason — kept for compatibility>",
+    "completeness": <true if the unit has setup+development+resolution; false if it starts/ends mid-thought>
   }}
 ]
 """
@@ -256,7 +298,14 @@ def segment_transcript(
 
 
 def _validate_topic_segments(raw: list[Any]) -> list[dict]:
-    """Keep only well-formed {start, end, ...} items with end > start; sort."""
+    """Keep only well-formed {start, end, ...} items with end > start; sort.
+
+    Adds (B1):
+      boundary_reason  — canonical alias for ends_because (both kept for back-compat).
+      completeness     — bool: does the topic contain setup→development→resolution?
+                         The LLM fills this in when prompted; falls back to True
+                         (safe default) when not present in the response.
+    """
     out: list[dict] = []
     for item in raw:
         if not isinstance(item, dict):
@@ -268,12 +317,25 @@ def _validate_topic_segments(raw: list[Any]) -> list[dict]:
             continue
         if end <= start:
             continue
+        ends_because = str(item.get("ends_because") or "")
+        # boundary_reason is the canonical name; ends_because kept for back-compat
+        boundary_reason = str(item.get("boundary_reason") or ends_because)
+        # completeness: LLM may return bool or string; default True when absent
+        raw_complete = item.get("completeness")
+        if isinstance(raw_complete, bool):
+            completeness = raw_complete
+        elif isinstance(raw_complete, str):
+            completeness = raw_complete.lower() not in ("false", "0", "no")
+        else:
+            completeness = True  # safe default
         out.append(
             {
                 "start": start,
                 "end": end,
                 "summary": str(item.get("summary") or ""),
-                "ends_because": str(item.get("ends_because") or ""),
+                "ends_because": ends_because,        # backward-compat
+                "boundary_reason": boundary_reason,  # canonical (B1)
+                "completeness": completeness,         # B1 addition
             }
         )
     out.sort(key=lambda s: s["start"])
@@ -368,3 +430,208 @@ def snap_end_off_next_topic(
     # No boundary respects the minimum length → leave the clip as-is rather than
     # over-trimming a coherent answer the segmenter split too finely.
     return start, end
+
+
+# ---------------------------------------------------------------------------
+# B1 — Deterministic unit-boundary detection from sentence spans
+# ---------------------------------------------------------------------------
+
+def detect_unit_boundaries(sentence_spans: list[dict]) -> list[int]:
+    """Return sorted list of sentence indices where a NEW topic unit starts (B1).
+
+    Index 0 always begins the first unit — it is NOT included in the return value.
+    The caller uses these indices with :func:`build_units_from_boundaries` to
+    construct unit dicts suitable for :func:`clip_within_unit`.
+
+    Deterministic signals detected (in addition to the LLM's semantic pass):
+    - A sentence starting with a list/transition marker
+      (TRANSITION_START_RE from this module) → that sentence starts a new unit.
+    - A sentence starting with a topic-opening cue (_TOPIC_OPENER_RE)
+      → new unit starts here.
+    - A sentence starting with a wrap-up cue (_WRAP_UP_RE)
+      → the sentence FOLLOWING it starts a new unit.
+
+    NOTE: a mid-transcript "?" does NOT create a unit boundary. Podcast speakers
+    ask rhetorical/self-Q&A questions constantly ("Why does that matter?"), so
+    splitting on every "?" shreds the transcript into 5-15s units and makes
+    clip_within_unit over-trim good clips. Starting a clip on an interviewer
+    question is prevented by is_bad_start_sentence instead; the LLM segmentation
+    pass handles genuine Q→A topic shifts semantically.
+
+    Args:
+        sentence_spans: list[{"text", "start", "end"}] — from build_sentence_spans
+                        or restore_sentences.
+
+    Returns:
+        Sorted list of sentence indices (0-based) where a new unit begins.
+        Empty list when sentence_spans has fewer than 2 elements.
+    """
+    if len(sentence_spans) < 2:
+        return []
+
+    boundaries: set[int] = set()
+    n = len(sentence_spans)
+
+    for i in range(n):
+        text = sentence_spans[i]["text"].strip()
+        prev_text = sentence_spans[i - 1]["text"].strip() if i > 0 else ""
+
+        # Sentence starts with list/transition marker → new unit here
+        if i > 0 and TRANSITION_START_RE.match(text):
+            boundaries.add(i)
+
+        # Sentence starts with topic-opening cue → new unit here
+        if i > 0 and _TOPIC_OPENER_RE.match(text):
+            boundaries.add(i)
+
+        # Previous sentence starts with wrap-up cue → current sentence is new unit
+        if i > 0 and _WRAP_UP_RE.match(prev_text):
+            boundaries.add(i)
+
+    return sorted(boundaries)
+
+
+def build_units_from_boundaries(
+    sentence_spans: list[dict],
+    boundary_indices: list[int],
+) -> list[dict]:
+    """Convert sentence-index boundary list into topic-unit dicts (B1 / B2).
+
+    Each unit dict has the same shape as :func:`segment_transcript` output:
+    {"start", "end"} — minimal shape used by :func:`clip_within_unit`.
+
+    Args:
+        sentence_spans:    list[{"text", "start", "end"}]
+        boundary_indices:  output of detect_unit_boundaries — sorted indices
+                           where new units begin (not including 0).
+
+    Returns:
+        list[{"start", "end"}] — one entry per unit, sorted by start time.
+        Returns a single unit covering the whole transcript when boundary_indices
+        is empty (or sentence_spans is empty).
+    """
+    if not sentence_spans:
+        return []
+
+    n = len(sentence_spans)
+    starts = [0] + sorted(set(i for i in boundary_indices if 0 < i < n))
+
+    units: list[dict] = []
+    for k, s_idx in enumerate(starts):
+        e_idx = starts[k + 1] - 1 if k + 1 < len(starts) else n - 1
+        units.append(
+            {
+                "start": float(sentence_spans[s_idx]["start"]),
+                "end": float(sentence_spans[e_idx]["end"]),
+                "summary": "",
+                "boundary_reason": "deterministic",
+                "ends_because": "deterministic",
+                "completeness": True,
+            }
+        )
+    return units
+
+
+# ---------------------------------------------------------------------------
+# B2 — Deterministic guard: enforce clip lies within a single topic unit
+# ---------------------------------------------------------------------------
+
+def _first_sentence_start_at_or_after(
+    sentence_spans: list[dict],
+    t: float,
+) -> float:
+    """Return the start of the first sentence that begins at or after *t*.
+
+    Falls back to t itself when no sentence qualifies.
+    """
+    for span in sentence_spans:
+        s = float(span["start"])
+        if s >= t - _EPS:
+            return s
+    return t
+
+
+def clip_within_unit(
+    candidate: dict,
+    units: list[dict],
+    sentence_spans: list[dict],
+    clip_len: tuple[int, int] | None = None,
+) -> dict:
+    """Enforce that a clip lies entirely within ONE topic unit (B2).
+
+    Pure deterministic guard:
+    - If candidate end crosses into a LATER unit than the one containing start,
+      the end is snapped back to the last sentence that ends within start's unit.
+    - If candidate start falls before the unit's first sentence, it is moved up
+      to the first sentence start of that unit.
+
+    This is a PURE function: no side-effects, no I/O.
+
+    Graceful no-op when:
+    - units is empty (returns candidate unchanged).
+    - sentence_spans is empty (returns candidate unchanged).
+    - The clip already sits within one unit (returns candidate unchanged).
+    - Snapping the end back would drop the clip BELOW clip_len[0] — the LLM's
+      chosen boundary is kept rather than over-trimming a good clip to a stub
+      (mirrors snap_end_off_next_topic; without this, over-fine deterministic
+      units shred legitimate 40-60s clips — see reviewer 2026-07-13).
+
+    Args:
+        candidate:      Clip dict with "start" and "end" float keys.
+        units:          list[{"start", "end"}] — from segment_transcript or
+                        build_units_from_boundaries.
+        sentence_spans: list[{"text", "start", "end"}].
+        clip_len:       (min_seconds, max_seconds) — the end-snap is skipped
+                        when it would produce a sub-min clip. None disables the
+                        minimum-length guard.
+
+    Returns:
+        A new dict (or the original when no adjustment is needed).
+    """
+    if not units or not sentence_spans:
+        return candidate
+
+    start = float(candidate.get("start", 0))
+    end = float(candidate.get("end", 0))
+    min_len = float(clip_len[0]) if clip_len else 0.0
+
+    si = _topic_index_at(units, start)
+    ei = _topic_index_at(units, end)
+
+    # ── Case 1: end bleeds into a later unit ──────────────────────────────────
+    if ei > si:
+        unit_end = float(units[si]["end"])
+        new_end = _last_sentence_end_at_or_before(
+            sentence_spans, unit_end, floor=start
+        )
+        # Only snap when it stays above the minimum clip length — never trim a
+        # good clip down to a stub because the deterministic units were fine.
+        if new_end > start and (new_end - start) >= min_len:
+            log.debug(
+                "clip_within_unit: end %.2f→%.2f (crossed from unit %d to %d; "
+                "snapped back to unit %d boundary %.2f)",
+                end, new_end, si, ei, si, unit_end,
+            )
+            candidate = {**candidate, "end": new_end}
+            end = new_end
+            # Recalculate ei in case the snap also changes the unit index
+            ei = _topic_index_at(units, end)
+        elif new_end > start:
+            log.debug(
+                "clip_within_unit: skipping end-snap %.2f→%.2f — would drop below "
+                "min_len=%.1fs; keeping LLM boundary",
+                end, new_end, min_len,
+            )
+
+    # ── Case 2: start is before the unit's opening sentence ──────────────────
+    unit_start = float(units[si]["start"])
+    if start < unit_start - _EPS:
+        new_start = _first_sentence_start_at_or_after(sentence_spans, unit_start)
+        if new_start < end:
+            log.debug(
+                "clip_within_unit: start %.2f→%.2f (before unit %d opening at %.2f)",
+                start, new_start, si, unit_start,
+            )
+            candidate = {**candidate, "start": new_start}
+
+    return candidate

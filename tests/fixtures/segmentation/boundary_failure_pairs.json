@@ -1,0 +1,41 @@
+{
+  "_doc": "Real gate-failure cases from the peptides campaign, with WRONG (what the ranker chose) vs CORRECT (where the point actually starts/resolves) boundaries. Correct boundaries were determined by a human reading the raw transcript (docs/CLIP_QUALITY_FIX_SPEC.md PART B3). These drive (1) contrasting-pair few-shots in the segmentation/ranking + verifier prompts and (2) regression cases in the eval harness (make eval-segmentation). Timestamps are seconds; correct_start/correct_end must sit on sentence boundaries in the source transcript.",
+  "pairs": [
+    {
+      "id": "F3_purity_scandal",
+      "source_id": "youtube:Cu9PVWM2fJo",
+      "wrong": {"start": 5.6, "end": 46.2},
+      "wrong_reason": "Starts mid-sentence ('more. Everything from...') with garbled phrasing and no clean topic intro; ends mid-metaphor on 'just the tip of the dick of the iceberg' (unfinished) which also opens a NEW thread ('I'm testing all of them').",
+      "correct": {"start": 15.3, "end": 42.2},
+      "correct_reason": "Opens on the claim 'On top of that, after sending everything for analytical testing, I think the research grade peptide market might be the dirtiest of them all', develops with the concrete Retatrutide test (claimed 60mg, was 108mg, 80% over), and RESOLVES at 'What that indicates is there's no quality control.' (42.2). Stops before the unfinished 'tip of the iceberg' metaphor and the new 'I'm testing all of them' thread.",
+      "hook": "A lab test on a Retatrutide bottle showed 80% MORE than the label claimed, and that means zero quality control."
+    },
+    {
+      "id": "F1_igf_dosing",
+      "source_id": "youtube:Cu9PVWM2fJo",
+      "wrong": {"start": 313.3, "end": 354.6},
+      "wrong_reason": "Starts mid-sentence ('me, which is 50 micrograms...') referencing unclear prior context ('We are the same' at 311 refers backwards); ends by trailing into a NEW topic — 'I also should probably update you on the best growth hormone secretagogues... now I have a direct line to clinicians' (a tier-list segment).",
+      "correct": {"start": 311.0, "end": 341.6},
+      "correct_reason": "Opens on the complete sentence 'Now, I've done it the way a clinician prescribed it to me, which is 50 micrograms three times a week right before bed, and it does work.', develops the tweaked hypertrophy dosing protocol (10mcg bilaterally pre-workout, intra-workout shake, 10mcg post-workout with meal, timing if on GH secretagogues), and RESOLVES at 'And it's awesome.' (341.6). Stops before the new tier-list topic.",
+      "hook": "A clinician prescribed IGF-1 one way, but knowing the short half-life he TWEAKED the protocol for hypertrophy."
+    },
+    {
+      "id": "F2_cycling_lr3",
+      "source_id": "youtube:Cu9PVWM2fJo",
+      "wrong": {"start": 145.8, "end": 181.7},
+      "wrong_reason": "Starts mid-sentence ('see is a lot of people cycle...'); ends mid-sentence on 'You don't want to you don't want to be in' — the sentence completes at 'that category' (182.2).",
+      "correct": {"start": 143.9, "end": 182.2},
+      "correct_reason": "Opens on 'But what you will see is a lot of people cycle between taking a growth hormone secretagogue and IGF-1 because there's an inherent built-in long-loop negative feedback', develops the contrarian 'double fisting' take and the LR3-vs-FDA-version point, and RESOLVES on the complete sentence ending 'you have to be a broken kid to get that. You don't want to be in that category.' (182.2).",
+      "hook": "Most people cycle growth hormone and IGF-1 separately, but he says double-fisting is the RIGHT way."
+    },
+    {
+      "id": "F4_turmeric_anecdote",
+      "source_id": "youtube:O640yAgq5f8",
+      "wrong": {"start": 8102.6, "end": 8134.0},
+      "wrong_reason": "Ends mid-thought as a NEW sub-point opens — 'most of it's beneficial action... some people benefit from systemic turmeric' bleeds into the turmeric-mechanism/gut-microbiome tangent that continues after the clip.",
+      "correct": {"start": 8109.1, "end": 8124.1},
+      "correct_reason": "Opens on Huberman's complete anecdote 'I had reported my own anecdotal experience that taking turmeric really crushed my DHT levels and I did not feel good... it crushed all sorts of positive feelings of vitality', and RESOLVES at 'The moment I stopped taking turmeric, felt great again.' (8124.1). A complete personal-experience point; stops before Kyle pivots into turmeric's mechanism.",
+      "hook": "Turmeric quietly CRUSHED his DHT and vitality, and he only felt right again after quitting it."
+    }
+  ]
+}
