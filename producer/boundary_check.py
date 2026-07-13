@@ -40,8 +40,108 @@ _TRAILING_DANGLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# §R.PART2 Req B1 — List/transition end-signal markers
+# ---------------------------------------------------------------------------
+# Sentence-START patterns that signal a list item or topic transition.
+# When a clip's last sentence begins with one of these, the end must be pulled
+# back to the prior sentence so the clip does not start the next topic.
+#
+# Examples: "Number 16, CAX" (clip-80), "Next up", "Moving on", etc.
+# Applied case-insensitively, anchored at the start of the sentence text.
+TRANSITION_START_RE = re.compile(
+    r"""^(?:
+        Number\s+\d+            # "Number 16, CAX"
+        | Number\s+[A-Z]        # "Number A", "Number B" (lettered list items)
+        | Next\s+up             # "Next up"
+        | The\s+next\s+one      # "The next one"
+        | Now\s+again           # "Now again"
+        | And\s+just\s+like     # "And just like"
+        | Also,                 # "Also,"
+        | Oh,\s+and             # "Oh, and"
+        | So\s+the\s+next       # "So the next"
+        | Moving\s+on           # "Moving on"
+        | Alright,?\s*next      # "Alright next" / "Alright, next"
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
 # Boundary-verification model preference
 _DEFAULT_BOUNDARY_MODEL = "anthropic/claude-haiku-4.5"
+
+
+# ---------------------------------------------------------------------------
+# §R.PART2 Req B1 — Transition-trim pure function
+# ---------------------------------------------------------------------------
+
+def trim_trailing_transition(
+    candidate: dict,
+    sentence_spans: list[dict],
+    clip_len: tuple[int, int],
+) -> dict:
+    """Remove a trailing list-transition sentence from the clip end (Req B1).
+
+    If the clip's last sentence (the first span whose end >= candidate["end"])
+    starts with a list or topic-transition marker (TRANSITION_START_RE), the
+    clip's end is pulled back to the prior sentence boundary.
+
+    Respects clip_len[0] (minimum duration) — returns the original candidate
+    unchanged when the trim would produce a clip shorter than the minimum.
+
+    This is a PURE function: no side-effects, no global state.
+
+    Args:
+        candidate:      Clip dict with "start" and "end" float keys.
+        sentence_spans: list[{"text", "start", "end"}].
+        clip_len:       (min_seconds, max_seconds).
+
+    Returns:
+        A new dict with adjusted "end", or the original candidate when no trim
+        applies or the trim would violate the minimum duration.
+    """
+    if not sentence_spans:
+        return candidate
+
+    start = float(candidate.get("start", 0))
+    end = float(candidate.get("end", 0))
+    min_len = clip_len[0]
+    n = len(sentence_spans)
+
+    # Locate end sentence: first span whose end >= candidate end
+    ei = n - 1
+    for i, span in enumerate(sentence_spans):
+        if float(span["end"]) >= end:
+            ei = i
+            break
+
+    last_text = sentence_spans[ei]["text"].strip()
+    if not TRANSITION_START_RE.match(last_text):
+        return candidate
+
+    # Can't trim further when at the first sentence
+    if ei == 0:
+        log.debug(
+            "Transition trim: last sentence at index 0 — cannot trim further"
+        )
+        return candidate
+
+    new_ei = ei - 1
+    new_end = float(sentence_spans[new_ei]["end"])
+
+    # Respect minimum duration
+    if (new_end - start) < min_len:
+        log.debug(
+            "Transition trim: skipping — trim would violate min_len=%.1fs "
+            "(would produce %.1fs)",
+            min_len, new_end - start,
+        )
+        return candidate
+
+    log.debug(
+        "Transition trim: pulled end %.2f→%.2f (removed transition %r)",
+        end, new_end, last_text[:60],
+    )
+    return {**candidate, "end": new_end}
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +271,37 @@ def apply_prefilters(
     if ei < n - 1 and needs_end_extension(sentence_spans[ei]["text"]):
         ei += 1
 
+    # ── Transition trim (Req B1): pull back if last sentence is a list/topic
+    #    transition marker ("Number 16", "Next up", "Moving on", etc.)
+    #    Loop so a run of consecutive transition sentences at the tail (e.g.
+    #    "Also, one more thing." then "Number 16, CAX.") is fully trimmed, not
+    #    just the last one. Bounded to avoid any pathological spin.
+    _tmp_start = float(sentence_spans[si]["start"])
+    for _ in range(4):
+        _tmp_end = float(sentence_spans[ei]["end"])
+        _trimmed = trim_trailing_transition(
+            {**candidate, "start": _tmp_start, "end": _tmp_end},
+            sentence_spans,
+            clip_len,
+        )
+        if _trimmed["end"] >= _tmp_end:
+            break  # no transition at the tail (or trim would break clip_len min)
+        # Find sentence index matching the trimmed end
+        matched = False
+        for _k in range(ei - 1, si - 1, -1):
+            if abs(float(sentence_spans[_k]["end"]) - _trimmed["end"]) < 0.01:
+                ei = _k
+                matched = True
+                break
+        if not matched:
+            # Trim landed on no sentence boundary — should be unreachable, but
+            # discarding it silently would hide a real bug. Surface and stop.
+            log.warning(
+                "Transition trim: no sentence index match for end=%.3f — trim discarded",
+                _trimmed["end"],
+            )
+            break
+
     # ── Enforce max duration ──────────────────────────────────────────────────
     new_start = float(sentence_spans[si]["start"])
     new_end = float(sentence_spans[ei]["end"])
@@ -252,6 +383,38 @@ def _build_boundary_prompt(
 
     return f"""You are a clip boundary quality reviewer for short-form social-media clips.
 
+FEW-SHOT EXAMPLES OF CORRECT VERDICTS:
+
+Example A — LIST ITEM BLEED (clip-80, Selank):
+  Clip sentences:
+    [0] "...some people report having a lot less daily anxiety when they use it, \
+but there's really mixed results. Some people have worse anxiety."
+    [1] "I'm not sure that I would try this one again."
+    [2] "Number 16, CAX. This is kind of like taking Adderall..."
+  Context after: "...with less jitteriness..."
+  Analysis: Sentence [1] ends the Selank idea cleanly. Sentence [2] starts a NEW \
+list item — "Number 16, CAX" is the next peptide in an enumerated list.
+  Correct verdict: {{"verdict": "fail", "reason": "Last sentence starts a new \
+list item (Number 16, CAX); trim it.", "adjusted_start_sentences": 0, \
+"adjusted_end_sentences": -1}}
+
+Example B — HOOK/BODY MISMATCH (clip-76, CJC vs retatrutide):
+  Hook: "GH secretagogues like CJC-1295 and ipamorelin are permissive anabolics."
+  Clip sentences:
+    [0] "...allodynia where their skin felt like it had been sunburned..."
+    [1] "...glucagon receptors on sensory neurons..."
+    [2] "...the risk for pancreatitis and gallstones..."
+    [3] "Now again, a lot of people are getting their hands on retatrutide..."
+    [4] "For retatrutide, in the trials, the doses were 2mg, 4, 6, 9, 12..."
+  Analysis: The hook promises content about CJC-1295 secretagogues. The entire \
+clip body is about retatrutide side effects and dosing — a completely different \
+subject. No trim can fix this; the whole span is wrong.
+  Correct verdict: {{"verdict": "fail", "reason": "Body never delivers the hook: \
+hook claims CJC-1295 secretagogues but clip is entirely about retatrutide side \
+effects and dosing.", "adjusted_start_sentences": 0, "adjusted_end_sentences": 0}}
+
+---
+
 CONTEXT BEFORE THE CLIP (not part of the clip — shown for coherence only):
 {before_block}
 
@@ -265,8 +428,12 @@ Inspect the clip and answer:
 1. Does the clip START on the first word of a self-contained thought? (never a \
 continuation opener: So/And/But/Well/Yeah/Right/Exactly/Totally/I mean; never \
 an interviewer question ending in "?")
-2. Does the clip END at the natural resolution of its main idea? (never on the \
-first sentence of a new topic; never with an unfinished comparison like/than/as if)
+2. Be STRICT about the END. The clip must end the MOMENT the specific idea resolves. \
+If the last 1-2 sentences introduce a new list item ("Number X", "Next up", \
+"Moving on"), a new named entity, a new question, a tangent, or a generic medical \
+disclaimer, set verdict=fail and return adjusted_end_sentences as a negative integer \
+to trim those sentences off. Never let the clip bleed past the resolution of its \
+main idea.
 3. If there are adjustment improvements, express them as deltas to the current \
 start/end sentence indices shown above (e.g. adjusted_start_sentences=+1 means \
 "skip the first sentence shown", adjusted_end_sentences=-1 means "drop the last sentence").

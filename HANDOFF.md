@@ -646,6 +646,65 @@ API endpoints added to `web/api.py`:
 - After both streams land: full review pass before commit.
 - Remaining system items: POSTIZ_API_URL confirmed set; rotate chat-pasted creds; verify re-deploy after git push.
 
+### 2026-07-12 — Session: Quality-fix PART 2 (topical relevance, hook/body match, aggressive end-trim)
+
+**All 7 build items implemented. Full suite: 792 passed (44 new tests, 0 regressions). Baseline was 748.**
+
+Three READY clips exposed the holes (clips 76/80/87 per orchestrator analysis of raw transcripts).
+
+**Item 1 — Hook/body match gate (Req A1): `producer/review_gate.py`**
+- New `hook_body_match: {"matches": bool, "reason": str}` field added to the Phase-2 `_content_llm_call` prompt and JSON template.
+- Prompt instruction (added near `self_contained`): "The hook names a SPECIFIC subject/claim. Verify the transcript actually delivers THAT subject. If the hook says CJC-1295 but the clip is about retatrutide side effects, matches=false."
+- `_score_content_verdict`: `matches==false` → HARD `didnt_pass`. Mechanism copied exactly from `campaign_alignment` (NOT relaxable via `relaxed_safety_checks`, NOT part of safety list). Absent field = pass for back-compat with existing mocked verdict tests.
+- `_run_phase2`: checks `hook_body_match` reason entries when determining gate_status; wired into the `gate_status` calculation alongside existing safety/alignment/boundary checks.
+- Reason entry added: `{"phase":"2","check":"hook_body_match","pass":false,...}`.
+
+**Item 2 — Topical relevance gate (Req A3): `producer/review_gate.py`**
+- New `topical_relevance: {"on_topic": bool, "reason": str}` field added to the same content-LLM call.
+- Prompt instruction: clip must SUBSTANTIVELY discuss campaign-specific content (from `ranking_rules`). Generic advice/disclaimers/hydration/magnesium with a passing mention → `on_topic=false`. Non-hardcoded: definition driven from `ranking_rules`.
+- `_score_content_verdict`: `on_topic==false` → HARD `didnt_pass` (same mechanism as `campaign_alignment`). Absent field = pass.
+- `_run_phase2`: `topical_fail` checked in gate_status determination.
+
+**Item 3 — Single-topic / multi-subject bleed (Req A2): `producer/review_gate.py`**
+- Strengthened the existing `SELF-CONTAINED BOUNDARY CHECK` prompt text: now explicitly fails `ends_on_new_topic=true` when the clip traverses more than ONE distinct subject mid-clip (different named entity, list transition, new question). "A self-contained clip is ONE topic start to finish."
+- No new field; strengthens existing `self_contained` behaviour.
+
+**Item 4 — List/transition end-signal trim (Req B1): `producer/boundary_check.py`**
+- New module-level `TRANSITION_START_RE` (compiled, `re.IGNORECASE | re.VERBOSE`): matches 11 sentence-start patterns — "Number \d+", "Number [A-Z]", "Next up", "The next one", "Now again", "And just like", "Also,", "Oh, and", "So the next", "Moving on", "Alright,? next".
+- New pure function `trim_trailing_transition(candidate, sentence_spans, clip_len) -> dict`: if clip's last sentence (first span whose end >= candidate.end) starts with `TRANSITION_START_RE`, pulls end back to prior sentence. Respects `clip_len[0]` min; no-op if trim would violate it. Returns new dict, never mutates original.
+- Applied in `apply_prefilters` after the existing end-extension logic: builds a temporary candidate at current sentence boundaries, calls `trim_trailing_transition`, updates sentence index `ei` if end moved.
+- The clip-80 case ("Number 16, CAX" at 238.4s) trims to 238.4 (end of Selank sentence).
+
+**Item 5 — Verifier END strictness (Req B2): `producer/boundary_check.py`**
+- `_build_boundary_prompt` now opens with two few-shot examples BEFORE the instructions:
+  - Example A (clip-80 list bleed): clips ending at "Number 16, CAX" → `adjusted_end_sentences: -1`.
+  - Example B (clip-76 hook/body mismatch): CJC hook + retatrutide body → full `verdict: fail`, `adjusted_end_sentences: 0` (not a trim — whole span wrong).
+- Question 2 in the prompt strengthened verbatim: "Be STRICT about the END. The clip must end the MOMENT the specific idea resolves. If the last 1-2 sentences introduce a new list item, a new named entity, a new question, a tangent, or a generic medical disclaimer, set verdict=fail and return adjusted_end_sentences negative to trim them off."
+
+**Item 6 — Ranker prompt few-shot (core/topics.py `FEWSHOT_BOUNDARY_EXAMPLES`)**
+- 3 new examples added (Examples 4, 5, 6) to the string already imported by `core/llm.py _build_prompt`:
+  - 4: Selank end-before-next-list-item (Number 16, CAX → trim to 238.4s).
+  - 5: CJC-1295 hook + retatrutide body = mismatch, wrong span entirely.
+  - 6: "racing heart on peptides" hook + generic hydration/magnesium/disclaimer body = topical-relevance fail.
+
+**Item 7 — Tests**
+- `tests/test_hook_body_gate.py` (16 tests): `TestHookBodyMatchField` (6 — matches pass, mismatch fail, absent=pass, not-relaxable, clip-76 style, default reason), `TestTopicalRelevanceField` (5 — on_topic pass, off-topic fail, absent=pass, not-relaxable, clip-87 style), `TestRunPhase2HookBodyAndTopical` (5 — hook_body_fail→didnt_pass, topical_fail→didnt_pass, both-absent no regression, high-score doesn't rescue either).
+- `tests/test_transition_trim.py` (28 tests): `TestTransitionStartRe` (18 — all 11 marker patterns pass, case-insensitive, no-match on clean sentences, no-match on empty), `TestTrimTrailingTransition` (8 — clip-80 trims to 238.4, no-op when min_len breaks, trim allowed when met, no marker unchanged, empty spans no-op, index-0 no-op, all 11 markers trim, result is new dict), `TestApplyPrefiltersTransitionTrim` (2 — clip-80 via apply_prefilters, normal clip unchanged).
+
+**New JSON fields in Phase-2 gate verdict:**
+- `hook_body_match: {"matches": bool, "reason": str}` (absent = pass)
+- `topical_relevance: {"on_topic": bool, "reason": str}` (absent = pass)
+
+**New constant exported from `producer/boundary_check.py`:**
+- `TRANSITION_START_RE` (compiled regex)
+- `trim_trailing_transition` (pure function, importable)
+
+**AST-checked:** producer/boundary_check.py, producer/review_gate.py, core/topics.py, tests/test_hook_body_gate.py, tests/test_transition_trim.py — all clean.
+
+**Files changed:** `producer/boundary_check.py`, `producer/review_gate.py`, `core/topics.py`, `tests/test_hook_body_gate.py` (NEW), `tests/test_transition_trim.py` (NEW).
+
+**Not committed** (per constraint — orchestrator owns commit/push).
+
 ### 2026-07-12 — Session: Render-quality fix pass (render-side stream)
 
 **4 build items implemented. Full suite: 748 passed (39 new tests, 0 regressions).**

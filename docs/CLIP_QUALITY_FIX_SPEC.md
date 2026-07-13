@@ -135,3 +135,95 @@ snaps land mid-thought. Layered fix, by leverage:
    Env override BOUNDARY_CHECK_MODEL; fall back to LLM_MODEL.
 5. NOT building: diarization (pyannote), custom completeness models,
    render-time semantic scoring (too late by design).
+
+---
+
+## PART 2 — Topical relevance + hook/body match + aggressive end-trim (operator review 2026-07-12, post-verification)
+
+Operator reviewed the READY clips and gave three findings. I (orchestrator) read
+the raw transcripts and pinned the exact correct boundaries. This section is
+BINDING for the follow-up fix.
+
+### Finding A — off-topic / hook-body mismatch reaches READY (clip 76)
+Clip 76 hook: "GH secretagogues like CJC-1295 and ipamorelin are permissive
+anabolics." ACTUAL clip body at its timestamps (497.6-556.6s), from the
+transcript:
+```
+497  ...allodynia where their skin felt like it had been sunburned...
+505  ...glucagon receptors on sensory neurons...
+521  ...just like semaglutide and tirzepatide, the risk for pancreatitis...
+531  ...and gallstones. rapid weight loss is the top trigger for gallstones...
+540  Now again, a lot of people are getting their hands on retatrutide...
+552  For retatrutide, in the trials, the doses were 2mg, 4, 6, 9, 12...
+```
+The body is entirely RETATRUTIDE side-effects + dosing — it never mentions
+CJC-1295 or secretagogues. The hook is about a different moment. The gate passed
+it at 0.75 because the content is internally coherent and on-brand-ish; nothing
+checked that the BODY delivers the HOOK's specific claim, nor that the clip stays
+on ONE topic (it spans allodynia → pancreatitis → gallstones → retatrutide
+dosing = 4 subjects).
+
+REQUIREMENT A1 (hook/body match, hard gate): the review gate MUST fail a clip
+when the clip body does not substantively deliver the specific claim in the hook.
+New Phase-2 verdict field `hook_body_match: {matches: bool, reason}`; matches==false
+→ hard didnt_pass (like campaign_alignment). Prompt must instruct: "The hook names
+a specific subject/claim. Does the transcript actually deliver THAT subject? If the
+hook says CJC-1295 but the clip is about retatrutide side effects, matches=false."
+
+REQUIREMENT A2 (single-topic / no multi-subject bleed): a clip that traverses
+more than one distinct subject (a different named peptide, a list transition, a
+new question) is not self-contained. Fold this into the existing self_contained
+check AND the pre-render boundary verifier: reject/ retrim when the clip contains
+a mid-clip subject change.
+
+REQUIREMENT A3 (topical relevance, not just stance): stance catches anti-peptide;
+it does NOT catch generic/off-topic. Add to the gate: the clip must substantively
+discuss a campaign topic (named peptide + its mechanism/experience/effect), not
+merely mention one in passing while the substance is generic advice. (Clip 87's
+body is generic heart-rate/hydration/magnesium/medical-disclaimer with one passing
+"retatrutide" — that is the failure mode to catch.)
+
+### Finding B — end bleeds past the idea's resolution (clip 80 Selank)
+Transcript:
+```
+232.7  ...some people report having a lot less daily anxiety when they use it,
+       but there's really mixed results. Some people have worse anxiety.
+236.9  I'm not sure that I would try this one again.   <-- IDEA RESOLVES ~238.4
+238.4  Number 16, CAX. This is kind of like taking Adderall...  <-- NEXT LIST ITEM
+```
+Clip ends at 238.9 → bleeds ~0.5-1s into "Number 16, CAX" (the next peptide).
+CORRECT END: 238.4 (end of "...try this one again."). The clip must end BEFORE
+the next list item is named.
+
+REQUIREMENT B1 (list/transition end-signals): the end must be pulled back to the
+last sentence of the current point when the following sentence begins a new list
+item or subject. Deterministic end-signal markers to detect at the tail and trim
+before: sentence STARTS with any of — "Number \d+", "Next up", "The next one",
+"Number", "Now again", "And just like", "Also,", "Oh, and", "So the next",
+"Moving on", "Alright, next". If a clip's last sentence is (or immediately
+precedes) such a transition, trim the end to the prior sentence boundary. Add
+these to producer/boundary_check.py and to the verifier + ranker prompt few-shot.
+
+REQUIREMENT B2 (verifier strictness on END): the pre-render boundary verifier is
+currently too lenient on the tail (these clips passed it). Strengthen its prompt:
+"Be STRICT about the END. The clip must end the MOMENT the specific idea in the
+hook resolves. If the last 1-2 sentences introduce a new list item, a new peptide,
+a new question, a tangent (e.g. a generic medical disclaimer), or start a
+different subject, set verdict=fail and return adjusted_end_sentences negative to
+trim them off." Include the clip-80 and clip-76 cases as few-shot examples.
+
+### Correct-boundary few-shot examples (bake into prompts verbatim)
+1. Selank clip: hook about Selank anxiety. GOOD end = "...I'm not sure that I
+   would try this one again." BAD end = bleeding into "Number 16, CAX" (next
+   peptide). Rule shown: end before the next list item.
+2. CJC clip: hook about CJC-1295 secretagogues, body about retatrutide gallstones
+   = hook/body MISMATCH → reject entirely (not a trim; the whole span is wrong).
+3. Generic-advice clip: hook "racing heart on peptides", body is generic
+   hydration/magnesium/"I'm a doctor on YouTube" disclaimer with one passing
+   peptide mention = topical-relevance FAIL.
+
+### Also observed (fix if cheap): punctuation-restored sentence spans show
+alignment artifacts (stray ",," tokens, timestamps that don't cover all content)
+in the cached `transcripts.sentences`. If the aligner is dropping/duplicating on
+YT-caption noise, harden `_align_sentences_to_times` — but never at the cost of
+the graceful-None fallback. Low priority vs A/B above.

@@ -344,13 +344,30 @@ TRANSCRIPT EXCERPT (this is the full spoken content of the clip):
 CAMPAIGN RANKING RULES:
 {ranking_rules or 'Default: prefer useful, interesting, standalone moments.'}{next_section}{pref_section}{stance_section}
 
-SELF-CONTAINED BOUNDARY CHECK (critical): A good clip is ONE complete idea. It \
-must start on a complete thought and END where that thought RESOLVES — it must NOT \
-cut off mid-point, and it must NOT bleed into the first sentence of a NEW topic \
-(e.g. a new question from the host, or the speaker starting a different subject). \
-Compare the END of the clip's transcript with what is said immediately after: if \
-the clip ends right as a new subject has only just been introduced, it FAILS the \
-boundary check and must be re-cut so it ends where the prior thought completed.
+HOOK/BODY MATCH CHECK (hard fail — not relaxable): The hook names a SPECIFIC \
+subject or claim. Verify that the transcript ACTUALLY delivers that subject. \
+If the hook says "CJC-1295 secretagogues" but the clip body is entirely about \
+retatrutide side effects and dosing, that is a MISMATCH — set matches=false. \
+The body must substantively cover what the hook promises, not merely share a \
+general topic area.
+
+TOPICAL RELEVANCE CHECK (hard fail — not relaxable): The clip must SUBSTANTIVELY \
+discuss a topic defined by the campaign ranking rules above. If the clip body is \
+mostly generic advice, medical disclaimers, or general health tips (e.g. \
+hydration, magnesium, "I'm a doctor on YouTube") with only a passing mention of \
+a campaign-specific topic, set on_topic=false. A single incidental mention of a \
+campaign topic does not make a clip topically relevant — the substance must be \
+campaign-specific.
+
+SELF-CONTAINED BOUNDARY CHECK (critical): A good clip is ONE complete idea — \
+ONE topic from start to finish. It must start on a complete thought and END \
+where that thought RESOLVES. Fail (ends_on_new_topic=true) if ANY of the \
+following are true: (a) the clip does not end where its main idea resolves and \
+bleeds into the first sentence of a NEW topic; (b) the clip traverses MORE THAN \
+ONE distinct subject mid-clip — a different named entity, a list transition \
+("Number X", "Next up"), or a new question; (c) a new subject has only just been \
+introduced at the tail. Compare the END of the clip's transcript with what is \
+said immediately after.
 
 Score each criterion from 0.0 (completely fails) to 1.0 (excellent):
 1. hook_quality: Does the opening create immediate curiosity or tension?
@@ -393,7 +410,15 @@ Return ONLY this JSON (no prose, no code fences, no markdown):
   "self_contained": {{
     "complete_thought": true,
     "ends_on_new_topic": false,
-    "reason": "<one line: does the clip start and end on a complete thought, or does it cut off mid-point / bleed into a new topic?>"
+    "reason": "<one line: does the clip start and end on ONE complete thought, or does it bleed into a new topic / traverse multiple subjects?>"
+  }},
+  "hook_body_match": {{
+    "matches": true,
+    "reason": "<one line: does the transcript body actually deliver the hook's specific subject/claim?>"
+  }},
+  "topical_relevance": {{
+    "on_topic": true,
+    "reason": "<one line: does the clip substantively discuss campaign-specific content, or is it mostly generic advice with a passing mention?>"
   }}{stance_json_field}
 }}"""
 
@@ -835,7 +860,9 @@ def _score_content_verdict(
     alignment_fail = False
     ca_raw = verdict.get("campaign_alignment")
     if isinstance(ca_raw, dict):
-        ca_aligned = bool(ca_raw.get("aligned", True))
+        # Fail ONLY on explicit False. A present-but-null value (truncated /
+        # null-defaulting LLM output) must not spuriously hard-fail a good clip.
+        ca_aligned = ca_raw.get("aligned") is not False
         ca_reason = str(ca_raw.get("reason") or "").strip()
         if not ca_aligned:
             alignment_fail = True
@@ -853,9 +880,67 @@ def _score_content_verdict(
             "reason": ca_reason_text,
         })
 
+    # ── Hook/body match (Req A1) ──────────────────────────────────────────
+    # HARD didnt_pass when hook_body_match.matches is explicitly False.
+    # NOT relaxable via relaxed_safety_checks; NOT part of the safety list.
+    # Absent field → PASS for backwards compatibility with existing mocked tests.
+    hook_body_fail = False
+    hbm_raw = verdict.get("hook_body_match")
+    if isinstance(hbm_raw, dict):
+        # Fail ONLY on explicit False (null/absent → pass; see campaign_alignment).
+        hbm_matches = hbm_raw.get("matches") is not False
+        hbm_reason = str(hbm_raw.get("reason") or "").strip()
+        if not hbm_matches:
+            hook_body_fail = True
+            hbm_reason_text = "HOOK/BODY MISMATCH: " + (
+                hbm_reason or "clip body does not deliver the hook's specific claim"
+            )
+        else:
+            hbm_reason_text = "Hook/body match OK: " + (
+                hbm_reason or "body delivers the hook's claim"
+            )
+        reasons.append({
+            "phase": "2",
+            "check": "hook_body_match",
+            "pass": hbm_matches,
+            "reason": hbm_reason_text,
+        })
+
+    # ── Topical relevance (Req A3) ────────────────────────────────────────
+    # HARD didnt_pass when topical_relevance.on_topic is explicitly False.
+    # NOT relaxable via relaxed_safety_checks; NOT part of the safety list.
+    # Absent field → PASS for backwards compatibility with existing mocked tests.
+    topical_fail = False
+    tr_raw = verdict.get("topical_relevance")
+    if isinstance(tr_raw, dict):
+        # Fail ONLY on explicit False (null/absent → pass; see campaign_alignment).
+        tr_on_topic = tr_raw.get("on_topic") is not False
+        tr_reason = str(tr_raw.get("reason") or "").strip()
+        if not tr_on_topic:
+            topical_fail = True
+            tr_reason_text = "TOPICAL RELEVANCE FAIL: " + (
+                tr_reason or "clip body is generic advice, not campaign-specific content"
+            )
+        else:
+            tr_reason_text = "Topical relevance OK: " + (
+                tr_reason or "clip substantively discusses campaign topic"
+            )
+        reasons.append({
+            "phase": "2",
+            "check": "topical_relevance",
+            "pass": tr_on_topic,
+            "reason": tr_reason_text,
+        })
+
     # ── Threshold check ──────────────────────────────────────────────────
     score_ok = formula_score >= FORMULA_SCORE_THRESHOLD
-    overall_pass = score_ok and not any_safety_fail and not alignment_fail
+    overall_pass = (
+        score_ok
+        and not any_safety_fail
+        and not alignment_fail
+        and not hook_body_fail
+        and not topical_fail
+    )
     reasons.append({
         "phase": "2",
         "check": "formula_score_threshold",
@@ -1212,10 +1297,27 @@ def _run_phase2(
         not r["pass"] and r["check"] == "campaign_alignment"
         for r in content_reasons
     )
+    # hook_body_match is a HARD fail — not relaxable (Req A1)
+    hook_body_fail = any(
+        not r["pass"] and r["check"] == "hook_body_match"
+        for r in content_reasons
+    )
+    # topical_relevance is a HARD fail — not relaxable (Req A3)
+    topical_fail = any(
+        not r["pass"] and r["check"] == "topical_relevance"
+        for r in content_reasons
+    )
     score_fail = formula_score < FORMULA_SCORE_THRESHOLD
     gate_status = (
         "ready"
-        if (not safety_fail and not score_fail and not boundary_fail and not alignment_fail)
+        if (
+            not safety_fail
+            and not score_fail
+            and not boundary_fail
+            and not alignment_fail
+            and not hook_body_fail
+            and not topical_fail
+        )
         else "didnt_pass"
     )
 

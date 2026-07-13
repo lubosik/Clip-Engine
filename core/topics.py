@@ -99,6 +99,47 @@ a discourse cue ("so anyway", "moving on", "the next thing", "another thing"),
 or a clear subject change. NEVER end on the first sentence of a new topic. Topic
 completeness beats hitting a target length: a clean 35s thought is better than a
 60s clip that starts a second topic.
+
+── Example 4 — LIST ITEM END BLEED (Selank anxiety, numbered list context)
+Transcript around the moment:
+  [232.7] "...some people report having a lot less daily anxiety when they use it,
+          but there's really mixed results. Some people have worse anxiety."
+  [236.9] "I'm not sure that I would try this one again."    ← IDEA RESOLVES ~238.4s
+  [238.4] "Number 16, CAX. This is kind of like taking Adderall..."  ← NEXT LIST ITEM
+CORRECT CLIP END: 238.4 ("...I'm not sure that I would try this one again.")
+WHY: The Selank discussion ends with the speaker's verdict. The very next sentence
+is "Number 16, CAX" — it starts a NEW enumerated list item (a different peptide).
+The clip must end BEFORE "Number 16" is spoken. Even a 0.5s bleed into the next
+list item makes the clip feel incomplete and off-brand.
+WRONG END: 238.9 — bleeds into "Number 16, CAX" (the next list item).
+
+── Example 5 — HOOK/BODY MISMATCH (CJC-1295 hook, retatrutide body)
+Transcript around the moment (497-556s):
+  [497]  "...allodynia where their skin felt like it had been sunburned..."
+  [505]  "...glucagon receptors on sensory neurons..."
+  [521]  "...the risk for pancreatitis and gallstones..."
+  [540]  "Now again, a lot of people are getting their hands on retatrutide..."
+  [552]  "For retatrutide, in the trials, the doses were 2mg, 4, 6, 9, 12..."
+Hook assigned to this span: "GH secretagogues like CJC-1295 and ipamorelin are
+permissive anabolics."
+WHY THIS IS WRONG: The hook promises content about CJC-1295 secretagogues. The
+entire body at 497-556s is about retatrutide side effects (allodynia, pancreatitis,
+gallstones) and dosing. These are unrelated subjects. This is NOT a trim problem —
+the whole span is wrong. Do NOT select this span for a CJC-1295 hook. Find the
+correct timestamp window where CJC-1295 is actually discussed.
+
+── Example 6 — TOPICAL RELEVANCE FAIL (generic advice with one passing mention)
+Hook: "racing heart on peptides"
+Clip body (87s): "If you have a racing heart, the first thing to check is your
+hydration. Drink more water, add electrolytes. Magnesium is the big one — most
+people are deficient. Also make sure you're not over-stimulating your adrenals.
+And as a quick disclaimer: I'm a doctor on YouTube, not your doctor. Always
+consult your physician before starting anything. Oh, and if you're on retatrutide
+just watch your heart rate during the first few weeks."
+WHY THIS FAILS TOPICAL RELEVANCE: The hook promises specific information about
+peptides causing a racing heart. The body is generic hydration/magnesium/disclaimer
+advice with one passing mention of retatrutide at the end. The substance is NOT
+campaign-specific content. This clip should be EXCLUDED.
 """
 
 
