@@ -765,3 +765,13 @@ Three READY clips exposed the holes (clips 76/80/87 per orchestrator analysis of
 - `render/modal_app.py` — Modal image: 3 new pip deps + comment
 - `producer/review_gate.py` — `_check_frames_sharp` + wired into `_run_phase1`
 - `tests/test_reframe_quality.py` — NEW (39 tests)
+
+### 2026-07-12 (later 6) — PART 2: topical/hook-match gate + list-transition end-trim (operator queue review)
+Operator reviewed READY clips, found 2 holes I fixed after reading the raw transcripts myself:
+- **clip 76** hook "CJC-1295 secretagogues" but body (497-556s) = entirely retatrutide allodynia/pancreatitis/gallstones/dosing → HOOK/BODY MISMATCH + 4 topics. **clip 87** = generic hydration/magnesium/"I'm a doctor on YouTube" disclaimer w/ one passing peptide mention → off-topic. Stance caught anti-peptide but NOT off-topic/mismatch — that was the hole.
+- **clip 80** Selank clip resolves at "...try this one again." (238.4) but ended 238.9, bleeding into next list item "Number 16, CAX".
+- Rejected clips 76 + 80 via API (structured reasons → learning-loop signals #2/#3; queue cleaned).
+- **Build (1 agent):** review_gate.py new hard-fail gates `hook_body_match{matches}` + `topical_relevance{on_topic}` (non-relaxable, absent/null=pass, driven by campaign ranking_rules — nothing hardcoded); self_contained prompt strengthened to reject multi-subject bleed; boundary_check.py `TRANSITION_START_RE` + `trim_trailing_transition` (pulls end back before "Number 16"/"Next up"/"Now again"/"And just like"/etc.) wired into apply_prefilters; verify_boundaries END-strictness prompt + clip-80/clip-76 few-shots; core/topics.py FEWSHOT +3 real cases.
+- **Zero-context reviewer: 3 MED, all fixed:** (1) `bool(x.get(k,True))` returned False on JSON null → spurious hard-fail; changed all 3 checks (incl. pre-existing campaign_alignment) to `x.get(k) is not False`; (2) consecutive tail transitions now fully trimmed (bounded loop, not one); (3) silent remap now warns. +regression tests.
+- **795 tests pass** (+47). Committed `ed5674b`, **GitHub push SUCCEEDED** (new PAT works) → Railway auto-deploy. No Modal change (gate/producer only). Verification demo watched.
+- NOTE for next niche: hook_body_match + topical_relevance are generic (read campaign ranking_rules), so they carry to any campaign. exhaust_source now respected on the all-dropped path (from earlier reviewer fix).
