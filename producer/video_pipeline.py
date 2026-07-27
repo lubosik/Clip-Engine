@@ -644,7 +644,7 @@ def run_video(
     campaign_name: str,
     url: str,
     *,
-    run_mode: str = "demo",
+    run_mode: str | None = None,
     max_apify_spend: float = 2.0,
     max_modal_spend: float = 3.0,
     force: bool = False,
@@ -694,6 +694,10 @@ def run_video(
     try:
         campaign_path = Path("campaigns") / f"{campaign_name}.yaml"
         campaign_cfg = load_campaign(campaign_path, strict_assets=False)
+        if run_mode is None:
+            # Contract §7: default mode = the campaign's own mode.
+            run_mode = getattr(campaign_cfg, "mode", "demo") or "demo"
+            log.info("run_video: mode not given; using campaign mode %r", run_mode)
     except Exception as exc:
         return VideoRunResult(
             campaign=campaign_name,
@@ -1273,8 +1277,8 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         choices=["demo", "production"],
-        default="demo",
-        help="Run mode (default: demo)",
+        default=None,
+        help="Run mode (default: the campaign's own mode from its YAML)",
     )
     parser.add_argument(
         "--max-apify-spend",

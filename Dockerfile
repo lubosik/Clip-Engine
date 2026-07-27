@@ -41,6 +41,9 @@ COPY web/ ./web/
 COPY campaigns/ ./campaigns/
 COPY assets/ ./assets/
 COPY migrations/ ./migrations/
+# Few-shot boundary examples loaded at runtime by core/fewshot.py — without
+# this the ranking/verifier prompts silently lose their real-world exemplars.
+COPY tests/fixtures/ ./tests/fixtures/
 COPY deploy/crontab deploy/start.sh ./deploy/
 RUN chmod +x ./deploy/start.sh
 
