@@ -41,10 +41,10 @@ critic review → correct-and-re-render (max 2 corrections) → judge → dashbo
 | Piece | Where | Contract |
 |---|---|---|
 | Source upsert | `producer/dedupe.py: upsert_source(session, candidate, campaign)` | candidate = {source_id, platform, url, title, author_handle, raw} |
-| Campaign row seed | `core/db.py: ensure_campaign(session, name, enabled, config_snapshot)` | call before any FK write |
+| Campaign row seed | `core/db.py: ensure_campaign(session, name, *, enabled=True, config_snapshot=None)` — enabled/config_snapshot are KEYWORD-ONLY | call before any FK write |
 | Transcript | `producer/transcripts.py: fetch_and_store_transcript(...)` | raises TranscriptFetchError on actor failure |
 | Punctuation/sentences | `core/punctuate.py`, Transcript.sentences cache | reuse as in `_process_source` |
-| Ranking/segmentation | `core/llm.py: rank_moments(...)` | combined topics+clips call, sentence-index mode |
+| Ranking/segmentation | `producer/ranker.py: rank_clips(transcript, comment_summary, cfg, preference_context, sentence_spans)` — use THIS wrapper (adds stance + speaker-turn prefilters), never call core.llm.rank_moments directly | combined topics+clips call, sentence-index mode |
 | Deterministic guards | `producer/boundary_check.py: apply_prefilters, verify_boundaries`, `core/topics.py: clip_within_unit, snap_end_off_next_topic` | pre-render, fail = re-cut before GPU spend |
 | Probe (spend guard) | `producer/download.py: probe_youtube(url)` | raises on DRM/unavailable BEFORE LLM spend |
 | Download | `producer/download.py: download_source(...)` | |

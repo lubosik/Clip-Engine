@@ -113,7 +113,8 @@ def _pipeline_upsert_source(session: Any, candidate: dict, campaign_name: str) -
 
 def _pipeline_ensure_campaign(session: Any, name: str, enabled: bool, config_snapshot: Any) -> Any:
     from core.db import ensure_campaign
-    return ensure_campaign(session, name, enabled, config_snapshot)
+    # ensure_campaign's enabled/config_snapshot are keyword-only.
+    return ensure_campaign(session, name, enabled=enabled, config_snapshot=config_snapshot)
 
 
 def _pipeline_fetch_transcript(
@@ -195,12 +196,15 @@ def _pipeline_rank_moments(
     sentence_spans: list[dict] | None = None,
     preference_context: str = "",
 ) -> list[dict]:
-    from core.llm import rank_moments
-    return rank_moments(
+    # Route through ranker.rank_clips — the same wrapper the campaign producer
+    # uses — so stance + §R2.3 speaker-turn prefilters apply here too.
+    from producer.ranker import rank_clips
+    return rank_clips(
         transcript,
+        None,
         ranking_cfg,
-        sentence_spans=sentence_spans,
         preference_context=preference_context,
+        sentence_spans=sentence_spans,
     )
 
 
@@ -875,11 +879,17 @@ def run_video(
         max_clips = getattr(campaign_cfg.ranking, "max_clips_per_source", 8) or 8
         ranking_cfg = campaign_cfg.ranking
 
+        try:
+            from core.preferences import build_preference_context
+            preference_context = build_preference_context(session, campaign_name)
+        except Exception:
+            preference_context = ""
+
         raw_candidates = _pipeline_rank_moments(
             segments,
             ranking_cfg,
             sentence_spans=sentence_spans,
-            preference_context="",
+            preference_context=preference_context,
         )
 
         log.info(
