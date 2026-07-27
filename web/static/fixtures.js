@@ -6,6 +6,8 @@
  * Shape mirrors the live API contract in REVAMP_CONTRACTS.md §6 exactly.
  * Updated for revamp v2: kind/mode/aspect on clips, schedule object on
  * campaigns, sources_summary array, engines, spend payload, hero nulls.
+ * Updated v3: fitness campaign removed (§9); peptides added as neutral demo.
+ * Updated v4: clips_detail per-clip rows; judge_decision; correction_attempts.
  */
 
 const NOW = Date.now();
@@ -31,12 +33,11 @@ export const hero = {
 
 export const campaigns = [
   {
-    name: 'fitness',
+    name: 'peptides',
     enabled: true,
     mode: 'production',
     sources_summary: [
-      { platform: 'youtube', count: 3, label: 'YouTube · 3 terms' },
-      { platform: 'tiktok',  count: 2, label: 'TikTok · 2 hashtags' },
+      { platform: 'youtube', count: 2, label: 'YouTube · 2 channels' },
     ],
     // schedule is now a formatted object — fixes [object Object] bug
     schedule: {
@@ -69,123 +70,106 @@ export const campaigns = [
 ];
 
 // Clips — kind/mode/aspect added per contract §1.
-// Mix: 3 regular clips (9:16), 2 memes (1:1 and 4:5).
+// Mix: 2 peptides clips (pending / didnt_pass with judge), 2 memes.
 export const clips = [
+  // Peptides — pending review
   {
-    id: 'mock_clip_001',
-    campaign: 'fitness',
+    id: 'mock_clip_p001',
+    campaign: 'peptides',
     kind: 'clip',
     mode: 'production',
     aspect: '9:16',
-    hook: 'Most people are leaving 40 % of their gains on the table with this one mistake',
-    score: 0.92,
-    reason: 'Strong hook, clear actionable insight, no unsafe claims',
+    hook: 'Most researchers overlook this critical peptide dosing window',
+    score: 0.91,
+    reason: 'Strong hook, cites mechanism, no unsafe dosing claims',
     caption:
-      'Most people are leaving 40 % of their gains on the table with this one mistake\n\nvia @HouseofHypertrophy\n#fitness #hypertrophy #protein #gymtok',
+      'Most researchers overlook this critical peptide dosing window\n\nvia @PeptideScience\n#peptides #biohacking #longevity',
     source: {
-      handle: 'HouseofHypertrophy',
-      url: 'https://youtube.com/watch?v=mock001',
-      title: 'The Complete Guide to Progressive Overload',
+      handle: 'PeptideScience',
+      url: 'https://youtube.com/watch?v=mock_p001',
+      title: 'BPC-157 Full Breakdown — Dosing, Timing and Mechanism',
       platform: 'youtube',
     },
-    start: 342.5,
-    end: 398.2,
-    duration: 55.7,
-    destination_channels: ['tiktok_fitness', 'instagram_fitness'],
+    start: 182.5,
+    end: 237.0,
+    duration: 54.5,
+    destination_channels: ['tiktok_peptides', 'instagram_peptides'],
     proposed_slot: hLater(4),
     created_at: hAgo(0.5),
     video_url: null,
     thumb_url: null,
     gate_status: 'ready',
     gate_reasons: [
-      { phase: '1', check: 'resolution', pass: true, reason: '1080x1920 OK' },
+      { phase: '1', check: 'resolution',            pass: true, reason: '1080x1920 OK' },
       { phase: '1', check: 'hook_present_in_hook_frame', pass: true, reason: 'Hook text visible in hook frame' },
-      { phase: '1', check: 'real_humans', pass: true, reason: 'Real human speaker detected' },
-      { phase: '2', check: 'formula_score', pass: true, reason: 'Score 0.92 >= threshold 0.60' },
+      { phase: '1', check: 'real_humans',           pass: true, reason: 'Real human speaker detected' },
+      { phase: '2', check: 'formula_score',         pass: true, reason: 'Score 0.91 >= threshold 0.60' },
     ],
-    formula_score: 0.92,
+    formula_score: 0.91,
+    judge_decision: null,
+    correction_attempts: 0,
   },
+
+  // Peptides — didnt_pass with judge_decision and 2 correction attempts
   {
-    id: 'mock_clip_002',
-    campaign: 'fitness',
+    id: 'mock_clip_p_fail',
+    campaign: 'peptides',
     kind: 'clip',
     mode: 'production',
     aspect: '9:16',
-    hook: "This is why you're not building muscle despite training hard",
-    score: 0.87,
-    reason: 'Addresses common pain point, good standalone value',
+    hook: 'This peptide combination has a 3x synergy effect',
+    score: 0.63,
+    reason: null,
     caption:
-      "This is why you're not building muscle despite training hard\n\nvia @JeffNippard\n#fitness #hypertrophy #gymtok",
+      'This peptide combination has a 3x synergy effect\n\nvia @PeptideScience\n#peptides #biohacking',
     source: {
-      handle: 'JeffNippard',
-      url: 'https://youtube.com/watch?v=mock002',
-      title: 'Science of Muscle Growth',
+      handle: 'PeptideScience',
+      url: 'https://youtube.com/watch?v=mock_p001',
+      title: 'BPC-157 Full Breakdown — Dosing, Timing and Mechanism',
       platform: 'youtube',
     },
-    start: 120.0,
-    end: 175.5,
-    duration: 55.5,
-    destination_channels: ['tiktok_fitness'],
-    proposed_slot: hLater(5),
-    created_at: hAgo(0.75),
-    video_url: null,
-    thumb_url: null,
-    gate_status: 'ready',
-    gate_reasons: [
-      { phase: '1', check: 'resolution', pass: true, reason: '1080x1920 OK' },
-      { phase: '1', check: 'speaker_centered', pass: true, reason: 'Speaker within center region' },
-      { phase: '2', check: 'formula_score', pass: true, reason: 'Score 0.87 >= threshold 0.60' },
-    ],
-    formula_score: 0.87,
-  },
-  {
-    id: 'mock_clip_003',
-    campaign: 'fitness',
-    kind: 'clip',
-    mode: 'demo',
-    aspect: '9:16',
-    hook: 'The optimal protein intake per meal is not what you think',
-    score: 0.78,
-    reason: 'Surprising fact, science-backed, broad appeal',
-    caption:
-      'The optimal protein intake per meal is not what you think\n\nvia @AlexanderFergus\n#fitness #protein #gymtok',
-    source: {
-      handle: 'AlexanderFergus',
-      url: 'https://youtube.com/watch?v=mock003',
-      title: 'Protein Timing Deep Dive',
-      platform: 'youtube',
-    },
-    start: 68.0,
-    end: 112.0,
-    duration: 44.0,
-    destination_channels: ['tiktok_fitness', 'instagram_fitness'],
-    proposed_slot: hLater(6),
+    start: 310.0,
+    end: 362.5,
+    duration: 52.5,
+    destination_channels: ['tiktok_peptides'],
+    proposed_slot: null,
     created_at: hAgo(1),
     video_url: null,
     thumb_url: null,
     gate_status: 'didnt_pass',
     gate_reasons: [
       { phase: '1', check: 'watermark_visible', pass: false, reason: 'No watermark detected in any frame' },
-      { phase: '1', check: 'captions_present', pass: false, reason: 'No word-by-word captions found in mid-clip frame' },
+      { phase: '1', check: 'captions_present',  pass: false, reason: 'No word-by-word captions found in mid-clip frame' },
     ],
     formula_score: null,
+    judge_decision: {
+      clip_id: 'mock_clip_p_fail',
+      decision: 'rejected',
+      reasons: [
+        'Caption burns are illegible at full playback speed',
+        'Hook text is absent from the first 3 seconds of the clip',
+      ],
+      decided_at: hAgo(0.5),
+    },
+    correction_attempts: 2,
   },
-  // Meme fixtures
+
+  // Meme fixtures (demo_run — unchanged except fitness refs removed)
   {
     id: 'mock_meme_001',
     campaign: 'demo_run',
     kind: 'meme',
     mode: 'demo',
     aspect: '1:1',
-    hook: 'When someone says they train twice a day',
+    hook: 'When someone asks if peptides are just "fancy supplements"',
     score: 0.83,
-    reason: 'On-brand humor, relatable, no unsafe content',
-    caption: 'When someone says they train twice a day \u{1F602}\n\n#gymhumor #fitness #gymtok',
+    reason: 'On-brand humor, relatable to niche audience, no unsafe content',
+    caption: 'When someone asks if peptides are just "fancy supplements" \u{1F602}\n\n#peptidehumor #biohacking #longevity',
     source: null,
     start: null,
     end: null,
     duration: null,
-    destination_channels: ['instagram_fitness'],
+    destination_channels: ['instagram_peptides'],
     proposed_slot: hLater(7),
     created_at: hAgo(2),
     video_url: null,
@@ -193,8 +177,10 @@ export const clips = [
     gate_status: 'pending',
     gate_reasons: null,
     formula_score: null,
+    judge_decision: null,
+    correction_attempts: 0,
     meme_meta: {
-      concept: 'relatable gym humor — overtraining archetype',
+      concept: 'relatable niche humor — skeptic archetype',
       classifier_scores: { on_format: 0.91, on_voice: 0.87, on_brand: 0.85, legibility: 0.94, compliance: 0.99 },
       profile_version: 1,
     },
@@ -205,15 +191,15 @@ export const clips = [
     kind: 'meme',
     mode: 'demo',
     aspect: '4:5',
-    hook: 'Progressive overload but make it aesthetic',
+    hook: 'Stack your recovery stack but make it aesthetic',
     score: 0.76,
     reason: 'Clean format, on-brand visual style',
-    caption: 'Progressive overload but make it aesthetic\n\n#fitness #gains #gymlife',
+    caption: 'Stack your recovery stack but make it aesthetic\n\n#biohacking #peptides #longevity',
     source: null,
     start: null,
     end: null,
     duration: null,
-    destination_channels: ['tiktok_fitness', 'instagram_fitness'],
+    destination_channels: ['tiktok_peptides', 'instagram_peptides'],
     proposed_slot: hLater(8),
     created_at: hAgo(3),
     video_url: null,
@@ -221,8 +207,10 @@ export const clips = [
     gate_status: 'pending',
     gate_reasons: null,
     formula_score: null,
+    judge_decision: null,
+    correction_attempts: 0,
     meme_meta: {
-      concept: 'aspirational training aesthetic with structured caption',
+      concept: 'aspirational protocol aesthetic with structured caption',
       classifier_scores: { on_format: 0.88, on_voice: 0.80, on_brand: 0.82, legibility: 0.91, compliance: 1.0 },
       profile_version: 1,
     },
@@ -242,7 +230,7 @@ function weekStart(weeksAgo) {
 export const analytics = {
   channels: [
     {
-      channel: 'tiktok_fitness',
+      channel: 'tiktok_peptides',
       weekly: [
         { week_start: weekStart(5), views: 12400, likes: 890,  comments: 123, shares: 45,  posts: 7 },
         { week_start: weekStart(4), views: 18200, likes: 1340, comments: 198, shares: 76,  posts: 7 },
@@ -253,7 +241,7 @@ export const analytics = {
       ],
     },
     {
-      channel: 'instagram_fitness',
+      channel: 'instagram_peptides',
       weekly: [
         { week_start: weekStart(5), views: 8300,  likes: 1240, comments: 67,  shares: 23,  posts: 7 },
         { week_start: weekStart(4), views: 11200, likes: 1780, comments: 89,  shares: 34,  posts: 7 },
@@ -267,9 +255,9 @@ export const analytics = {
   clips: [
     {
       clip_id: 'mock_a1',
-      hook: 'Most people are leaving 40 % of their gains on the table',
+      hook: 'Most researchers overlook this critical peptide dosing window',
       platform: 'tiktok',
-      permalink: 'https://tiktok.com/@viciresearch/video/mock1',
+      permalink: 'https://tiktok.com/@viciresearch/video/mock_p1',
       views: 45200,
       likes: 3400,
       comments: 234,
@@ -277,13 +265,13 @@ export const analytics = {
       posted_at: hAgo(24 * 8),
       mode: 'production',
       kind: 'clip',
-      campaign: 'fitness',
+      campaign: 'peptides',
     },
     {
       clip_id: 'mock_a2',
-      hook: 'The optimal protein intake per meal is not what you think',
+      hook: 'The half-life difference between TB-500 and BPC-157 explained',
       platform: 'instagram',
-      permalink: 'https://instagram.com/reel/mockABC',
+      permalink: 'https://instagram.com/reel/mockPEP2',
       views: 38900,
       likes: 5600,
       comments: 189,
@@ -291,11 +279,11 @@ export const analytics = {
       posted_at: hAgo(24 * 9),
       mode: 'production',
       kind: 'clip',
-      campaign: 'fitness',
+      campaign: 'peptides',
     },
     {
       clip_id: 'mock_a3',
-      hook: 'When someone says they train twice a day',
+      hook: 'When someone asks if peptides are just "fancy supplements"',
       platform: 'instagram',
       permalink: 'https://instagram.com/p/mockMEME1',
       views: 21400,
@@ -310,18 +298,18 @@ export const analytics = {
   ],
 };
 
-// Sources — mock data for the Sources view (history tab)
+// Sources — mock data for the Sources view (history tab).
 // Includes new pipeline fields: stage, clips_identified, clips_rendered,
-// clips_approved, clips_rejected, clips_pending, exhaustion
+// clips_approved, clips_rejected, clips_pending, exhaustion.
 export const sources = [
   {
     id: 1,
-    source_id: 'youtube:mock001',
+    source_id: 'youtube:mock_p001',
     platform: 'youtube',
-    url: 'https://youtube.com/watch?v=mock001',
-    title: 'The Complete Guide to Progressive Overload',
-    author_handle: 'HouseofHypertrophy',
-    campaign: 'fitness',
+    url: 'https://youtube.com/watch?v=mock_p001',
+    title: 'BPC-157 Full Breakdown — Dosing, Timing and Mechanism',
+    author_handle: 'PeptideScience',
+    campaign: 'peptides',
     status: 'done',
     stage: 'complete',
     clips_identified: 3,
@@ -335,21 +323,21 @@ export const sources = [
     processed_at: hAgo(3),
     clip_count: 3,
     clips: [
-      { id: '1', hook: 'Most people leave 40% of gains on the table', status: 'approved', gate_status: 'ready' },
-      { id: '2', hook: 'Progressive overload is about more than just weight', status: 'pending_review', gate_status: 'ready' },
-      { id: '3', hook: 'The optimal rep range myth explained', status: 'rejected', gate_status: 'didnt_pass' },
+      { id: 'mock_clip_p001', hook: 'Most researchers overlook this critical peptide dosing window', status: 'approved',        gate_status: 'ready'      },
+      { id: 'mock_clip_p002', hook: 'BPC-157 reaches peak plasma concentration within 30 minutes',  status: 'pending_review', gate_status: 'ready'      },
+      { id: 'mock_clip_p003', hook: 'Stacking TB-500 with BPC-157 — the right ratio',               status: 'rejected',       gate_status: 'didnt_pass' },
     ],
     used_ranges_count: 3,
-    thumbnail_url: 'https://i.ytimg.com/vi/mock001/hqdefault.jpg',
+    thumbnail_url: null,
   },
   {
     id: 2,
-    source_id: 'youtube:mock002',
+    source_id: 'youtube:mock_p002',
     platform: 'youtube',
-    url: 'https://youtube.com/watch?v=mock002',
-    title: 'Science of Muscle Growth',
-    author_handle: 'JeffNippard',
-    campaign: 'fitness',
+    url: 'https://youtube.com/watch?v=mock_p002',
+    title: 'GHK-Cu Peptide — Full Science Review',
+    author_handle: 'BiohackLab',
+    campaign: 'peptides',
     status: 'partially_done',
     stage: 'reviewing',
     clips_identified: 3,
@@ -363,19 +351,19 @@ export const sources = [
     processed_at: hAgo(12),
     clip_count: 1,
     clips: [
-      { id: '4', hook: "This is why you're not building muscle", status: 'pending_review', gate_status: 'ready' },
+      { id: 'mock_clip_p004', hook: 'GHK-Cu upregulates over 4000 genes involved in repair', status: 'pending_review', gate_status: 'ready' },
     ],
     used_ranges_count: 1,
-    thumbnail_url: 'https://i.ytimg.com/vi/mock002/hqdefault.jpg',
+    thumbnail_url: null,
   },
   {
     id: 3,
-    source_id: 'tiktok:mock003',
-    platform: 'tiktok',
-    url: 'https://tiktok.com/@fitnessguru/video/mock003',
-    title: 'Quick protein hack every lifter needs',
-    author_handle: 'fitnessguru',
-    campaign: 'fitness',
+    source_id: 'youtube:mock_p003',
+    platform: 'youtube',
+    url: 'https://youtube.com/watch?v=mock_p003',
+    title: 'Semax and Selank — Nootropic peptides explained',
+    author_handle: 'BiohackLab',
+    campaign: 'peptides',
     status: 'selected',
     stage: 'queued',
     clips_identified: null,
@@ -394,65 +382,86 @@ export const sources = [
   },
 ];
 
-// In-progress sources — shown in the live "In progress" panel (SSE / polling)
-// Three stages: rendering 3/10, reviewing 2/5 approved, failed
+// In-progress sources — shown in the live "In progress" panel (SSE / polling).
+// One source has clips_detail exercising every per-clip state.
+// One source is failed (demonstrates error display).
 export const sourcesProgress = [
+  // In-progress source with clips_detail — stage: correcting
+  // Exercises: ready · correcting fix 1/2 · didn't pass · rendering
   {
     id: 4,
-    source_id: 'youtube:inprog001',
+    source_id: 'youtube:inprog_p001',
     platform: 'youtube',
-    url: 'https://youtube.com/watch?v=inprog001',
-    title: 'Advanced Muscle Building Techniques That Actually Work',
-    author_handle: 'ScottHermanFitness',
-    campaign: 'fitness',
+    url: 'https://youtube.com/watch?v=inprog_p001',
+    title: 'Peptide Protocols for Accelerated Recovery — Science Deep Dive',
+    author_handle: 'PeptideScience',
+    campaign: 'peptides',
     status: 'selected',
-    stage: 'rendering',
-    clips_identified: 10,
-    clips_rendered: 3,
+    stage: 'correcting',
+    clips_identified: 4,
+    clips_rendered: 4,
     clips_approved: 0,
-    clips_rejected: 0,
-    clips_pending: 3,
+    clips_rejected: 1,
+    clips_pending: 2,
     stage_error: null,
     stage_updated_at: hAgo(0.1),
     exhaustion: 'in_progress',
     processed_at: hAgo(0.5),
-    clip_count: 3,
+    clip_count: 4,
     clips: [],
-    used_ranges_count: 3,
-    thumbnail_url: 'https://i.ytimg.com/vi/inprog001/hqdefault.jpg',
+    used_ranges_count: 4,
+    thumbnail_url: null,
+    // clips_detail — SSE §6 payload exercising all four per-clip states
+    clips_detail: [
+      {
+        id: 'cd_p001',
+        gate_status: 'ready',
+        status: 'approved',
+        correction_attempts: 0,
+        last_failure_reasons: [],
+        judge: 'approved',
+      },
+      {
+        id: 'cd_p002',
+        gate_status: 'pending',
+        status: 'correcting',
+        correction_attempts: 1,
+        last_failure_reasons: [
+          'Caption text is missing from the hook frame',
+          'Speaker is not centred within the 9:16 crop',
+        ],
+        judge: null,
+      },
+      {
+        id: 'cd_p003',
+        gate_status: 'rejected',
+        status: 'rejected',
+        correction_attempts: 2,
+        last_failure_reasons: [
+          'Watermark not visible in any sampled frame',
+          'Hook text absent from first 5 frames of the clip',
+        ],
+        judge: 'rejected',
+      },
+      {
+        id: 'cd_p004',
+        gate_status: 'pending',
+        status: 'rendering',
+        correction_attempts: 0,
+        last_failure_reasons: [],
+        judge: null,
+      },
+    ],
   },
+  // Failed source — demonstrates error block
   {
     id: 5,
-    source_id: 'youtube:inprog002',
+    source_id: 'youtube:inprog_p002',
     platform: 'youtube',
-    url: 'https://youtube.com/watch?v=inprog002',
-    title: 'The TRUTH About Intermittent Fasting',
-    author_handle: 'ThomasDeLauerFit',
-    campaign: 'fitness',
-    status: 'selected',
-    stage: 'reviewing',
-    clips_identified: 7,
-    clips_rendered: 5,
-    clips_approved: 2,
-    clips_rejected: 1,
-    clips_pending: 2,
-    stage_error: null,
-    stage_updated_at: hAgo(0.25),
-    exhaustion: 'in_progress',
-    processed_at: hAgo(1),
-    clip_count: 5,
-    clips: [],
-    used_ranges_count: 5,
-    thumbnail_url: null,
-  },
-  {
-    id: 6,
-    source_id: 'tiktok:inprog003',
-    platform: 'tiktok',
-    url: 'https://tiktok.com/@infusedperformance/video/inprog003',
-    title: 'Creatine supplementation guide',
-    author_handle: 'infusedperformance',
-    campaign: 'fitness',
+    url: 'https://youtube.com/watch?v=inprog_p002',
+    title: 'Epithalon Anti-Aging Protocol — Full Review',
+    author_handle: 'BiohackLab',
+    campaign: 'peptides',
     status: 'selected',
     stage: 'failed',
     clips_identified: null,
@@ -460,7 +469,7 @@ export const sourcesProgress = [
     clips_approved: 0,
     clips_rejected: 0,
     clips_pending: 0,
-    stage_error: 'Apify transcript actor failed: ACTOR_TIMED_OUT after 120s. Video may be age-restricted or has restricted access. Check that the TikTok account is public and not geo-blocked.',
+    stage_error: 'Apify transcript actor failed: ACTOR_TIMED_OUT after 120s. Video may be age-restricted or has restricted access. Check that the YouTube account is public and not geo-blocked.',
     stage_updated_at: hAgo(0.5),
     exhaustion: 'in_progress',
     processed_at: null,
@@ -468,27 +477,34 @@ export const sourcesProgress = [
     clips: [],
     used_ranges_count: 0,
     thumbnail_url: null,
+    clips_detail: null,
   },
 ];
 
-// Approved clips — shown in the Queue "Approved" collapsible section
-// Separate from fixtures.clips to avoid polluting the pending queue in mock mode
+// Approved clips — shown in the Queue "Approved" collapsible section.
+// Separate from fixtures.clips to avoid polluting the pending queue in mock mode.
 export const approvedClips = [
   {
-    id: 'mock_clip_approved_001',
-    campaign: 'fitness',
+    id: 'mock_clip_p_approved_001',
+    campaign: 'peptides',
     kind: 'clip',
     mode: 'production',
     aspect: '9:16',
-    hook: 'Sleep is the most underrated muscle builder — here is the science',
+    hook: 'BPC-157 reaches peak plasma concentration within 30 minutes of subcutaneous injection',
     score: 0.89,
     status: 'approved',
-    caption: 'Sleep is the most underrated muscle builder\n\nvia @HouseofHypertrophy\n#fitness #sleep #recovery #hypertrophy',
-    source: { handle: 'HouseofHypertrophy', url: 'https://youtube.com/watch?v=mock001', title: 'The Complete Guide to Progressive Overload', platform: 'youtube' },
+    caption:
+      'BPC-157 reaches peak plasma concentration within 30 minutes\n\nvia @PeptideScience\n#peptides #bpc157 #recovery #biohacking',
+    source: {
+      handle: 'PeptideScience',
+      url: 'https://youtube.com/watch?v=mock_p001',
+      title: 'BPC-157 Full Breakdown — Dosing, Timing and Mechanism',
+      platform: 'youtube',
+    },
     start: 480,
     end: 535,
     duration: 55,
-    destination_channels: ['tiktok_fitness'],
+    destination_channels: ['tiktok_peptides'],
     proposed_slot: hLater(10),
     scheduled_at: null,
     created_at: hAgo(2),
@@ -497,23 +513,31 @@ export const approvedClips = [
     gate_status: 'ready',
     gate_reasons: [],
     formula_score: 0.89,
+    judge_decision: null,
+    correction_attempts: 0,
     review_feedback: { action: 'approved', reasons: [], note: null, decided_at: hAgo(1.5) },
   },
   {
-    id: 'mock_clip_approved_002',
-    campaign: 'fitness',
+    id: 'mock_clip_p_approved_002',
+    campaign: 'peptides',
     kind: 'clip',
     mode: 'production',
     aspect: '9:16',
-    hook: 'You only need 3 exercises to build a complete upper body',
+    hook: 'The GHK-Cu skin repair mechanism works at the gene expression level',
     score: 0.82,
     status: 'scheduled',
-    caption: 'You only need 3 exercises to build a complete upper body\n\nvia @JeffNippard\n#fitness #gym #training',
-    source: { handle: 'JeffNippard', url: 'https://youtube.com/watch?v=mock002', title: 'Science of Muscle Growth', platform: 'youtube' },
+    caption:
+      'The GHK-Cu skin repair mechanism works at the gene expression level\n\nvia @BiohackLab\n#peptides #ghkcu #antiaging #longevity',
+    source: {
+      handle: 'BiohackLab',
+      url: 'https://youtube.com/watch?v=mock_p002',
+      title: 'GHK-Cu Peptide — Full Science Review',
+      platform: 'youtube',
+    },
     start: 200,
     end: 255,
     duration: 55,
-    destination_channels: ['tiktok_fitness', 'instagram_fitness'],
+    destination_channels: ['tiktok_peptides', 'instagram_peptides'],
     proposed_slot: hLater(14),
     scheduled_at: hLater(14),
     created_at: hAgo(3),
@@ -522,14 +546,16 @@ export const approvedClips = [
     gate_status: 'ready',
     gate_reasons: [],
     formula_score: 0.82,
+    judge_decision: null,
+    correction_attempts: 0,
     review_feedback: { action: 'approved', reasons: [], note: null, decided_at: hAgo(2) },
   },
 ];
 
 // Approval-rate time series — keyed by campaign name
 export const approvalRate = {
-  fitness: {
-    campaign: 'fitness',
+  peptides: {
+    campaign: 'peptides',
     weeks: [
       { week_start: weekStart(7), approved: 3, rejected: 2, rate: 0.60,   profile_versions: [] },
       { week_start: weekStart(6), approved: 5, rejected: 1, rate: 0.833,  profile_versions: [1] },
@@ -556,18 +582,18 @@ export const approvalRate = {
 
 // Preference profile — keyed by campaign name
 export const profile = {
-  fitness: {
-    campaign: 'fitness',
+  peptides: {
+    campaign: 'peptides',
     version: 2,
     rules: [
-      'Hook must be a surprising or counterintuitive claim about fitness science',
-      'Speaker should be visible and energetic in the first 2 seconds',
-      'Clip should contain a clear actionable insight, not just motivation',
-      'Avoid clips where the speaker reads from notes or looks away from camera',
+      'Hook must reference a specific mechanism or surprising statistic about peptide science',
+      'Speaker should be visible and credible in the first 2 seconds',
+      'Clip should contain a clear, science-backed insight — not anecdote alone',
+      'Avoid clips where dosing numbers are stated without context or safety caveats',
       'Duration between 35 and 58 seconds — not shorter, not longer',
-      'No supplement claims that name specific brands',
-      'Prefer clips where data or studies are cited explicitly',
-      'Clips about protein, progressive overload, or sleep perform best',
+      'No claims naming specific vendors or black-market sources',
+      'Prefer clips where peer-reviewed studies are cited or on-screen',
+      'BPC-157, TB-500, GHK-Cu, and Semax topics perform best',
     ],
     created_at: hAgo(24 * 3),
     meta: {
@@ -586,13 +612,13 @@ export const spend = {
   month_to_date_usd: 4.32,
   remaining_credit_usd: 25.68,
   by_campaign: [
-    { campaign: 'fitness',  usd: 3.10, jobs: 41 },
-    { campaign: 'demo_run', usd: 1.22, jobs: 12 },
+    { campaign: 'peptides',  usd: 3.10, jobs: 41 },
+    { campaign: 'demo_run',  usd: 1.22, jobs: 12 },
   ],
   recent: [
-    { clip_id: 'mock_clip_001', campaign: 'fitness',  gpu: 'l4', duration_s: 42.3, usd: 0.0094, created_at: hAgo(3)  },
-    { clip_id: 'mock_clip_002', campaign: 'fitness',  gpu: 't4', duration_s: 38.7, usd: 0.0063, created_at: hAgo(5)  },
-    { clip_id: 'mock_meme_001', campaign: 'demo_run', gpu: 'l4', duration_s: 18.2, usd: 0.0040, created_at: hAgo(12) },
+    { clip_id: 'mock_clip_p001',  campaign: 'peptides',  gpu: 'l4', duration_s: 42.3, usd: 0.0094, created_at: hAgo(3)  },
+    { clip_id: 'mock_clip_p_fail', campaign: 'peptides', gpu: 't4', duration_s: 38.7, usd: 0.0063, created_at: hAgo(5)  },
+    { clip_id: 'mock_meme_001',   campaign: 'demo_run',  gpu: 'l4', duration_s: 18.2, usd: 0.0040, created_at: hAgo(12) },
   ],
   apify: {
     total_usd: 0.47,

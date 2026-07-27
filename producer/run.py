@@ -65,7 +65,9 @@ def set_source_stage(
     This ensures stage tracking never kills a source processing run.
 
     stage: one of queued | transcribing | identifying | rendering |
-                   reviewing | complete | failed
+                   reviewing | correcting | complete | failed
+           ('correcting' is new in the add-video pipeline — set while the
+           orchestrator applies critic corrections before a re-render.)
     clips_identified: set when ranking finishes (the denominator for "n/N").
     error: human-readable failure description (truncated to 500 chars).
     """

@@ -2,7 +2,7 @@
 tests/test_config.py — campaign config loading and validation.
 
 Tests that:
-  - fitness.yaml loads and validates without errors (strict_assets=False)
+  - test_campaign.yaml loads and validates without errors (strict_assets=False)
   - All expected field values match the spec
   - Invalid configs fail loudly with descriptive messages
   - Asset validation raises the right errors when strict_assets=True
@@ -19,26 +19,26 @@ import yaml
 
 # Locate the project root relative to this test file
 PROJECT_ROOT = Path(__file__).parent.parent
-FITNESS_YAML = PROJECT_ROOT / "campaigns" / "fitness.yaml"
+FITNESS_YAML = PROJECT_ROOT / "tests" / "fixtures" / "test_campaign.yaml"
 
 
-def test_fitness_yaml_exists():
+def test_testcamp_yaml_exists():
     """The demo campaign YAML must exist at the expected path."""
-    assert FITNESS_YAML.exists(), f"fitness.yaml not found at {FITNESS_YAML}"
+    assert FITNESS_YAML.exists(), f"test_campaign.yaml not found at {FITNESS_YAML}"
 
 
-def test_fitness_yaml_loads_and_validates():
-    """fitness.yaml must load and validate without errors."""
+def test_testcamp_yaml_loads_and_validates():
+    """test_campaign.yaml must load and validate without errors."""
     from core.config import load_campaign
 
     cfg = load_campaign(FITNESS_YAML, strict_assets=False)
 
-    assert cfg.name == "fitness"
+    assert cfg.name == "testcamp"
     assert cfg.enabled is True
 
 
-def test_fitness_sources():
-    """fitness.yaml sources match the spec."""
+def test_testcamp_sources():
+    """test_campaign.yaml sources match the spec."""
     from core.config import load_campaign
 
     cfg = load_campaign(FITNESS_YAML, strict_assets=False)
@@ -57,7 +57,7 @@ def test_fitness_sources():
     assert cfg.sources.instagram is not None
 
 
-def test_fitness_ranking_defaults():
+def test_testcamp_ranking_defaults():
     """Ranking config must match spec §2 defaults."""
     from core.config import load_campaign
 
@@ -71,7 +71,7 @@ def test_fitness_ranking_defaults():
     assert "EXCLUDE" in r.ranking_rules  # safety content filter present
 
 
-def test_fitness_template():
+def test_testcamp_template():
     """Template config must match spec §2 values."""
     from core.config import load_campaign
 
@@ -95,7 +95,7 @@ def test_fitness_template():
     assert t.outro.audio == "keep"
 
 
-def test_fitness_destinations():
+def test_testcamp_destinations():
     """Destinations config must match spec §2 values."""
     from core.config import load_campaign
 
@@ -111,7 +111,7 @@ def test_fitness_destinations():
     assert "#hypertrophy" in d.hashtags
 
 
-def test_fitness_analytics():
+def test_testcamp_analytics():
     from core.config import load_campaign
 
     cfg = load_campaign(FITNESS_YAML, strict_assets=False)
@@ -119,15 +119,15 @@ def test_fitness_analytics():
     assert cfg.analytics.pull_day == "monday"
 
 
-def test_fitness_asset_paths_listed():
-    """Asset paths should be non-empty strings pointing to assets/fitness/."""
+def test_testcamp_asset_paths_listed():
+    """Asset paths should be non-empty strings pointing to assets/testcamp/."""
     from core.config import load_campaign
 
     cfg = load_campaign(FITNESS_YAML, strict_assets=False)
     paths = cfg.asset_paths()
 
     assert all(isinstance(p, str) and p for p in paths)
-    assert all("fitness" in p for p in paths)
+    assert all("testcamp" in p for p in paths)
 
 
 def test_strict_assets_fails_loudly_when_missing(tmp_path):

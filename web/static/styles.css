@@ -3372,3 +3372,134 @@ details[open] .source-clips-summary::before {
   color: var(--accent-dim);
   font-weight: 700;
 }
+
+/* ── Add-video button row (per campaign card) ───────────────────────────────── */
+
+.campaign-add-video-row {
+  margin-top: 10px;
+  display: flex;
+}
+
+.add-video-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 44px; /* WCAG touch target */
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* ── Add-video sheet internals ───────────────────────────────────────────────── */
+
+/* Advanced section toggle chevron — rotates when open */
+.av-adv-chevron {
+  display: inline-block;
+  transition: transform 0.18s var(--spring, ease);
+}
+
+details[open] .av-adv-chevron {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .av-adv-chevron { transition: none; }
+}
+
+/* Force re-clip wrapper — injected on 409 */
+.av-force-wrap {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 30%, transparent);
+}
+
+.av-force-msg {
+  font-size: 13px;
+  color: var(--amber);
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+/* ── Per-clip detail rows (in-progress source cards) ────────────────────────── */
+
+.source-clips-detail {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.source-clips-aggregate {
+  font-size: 11px;
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+  margin-bottom: 2px;
+}
+
+.clip-detail-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.clip-detail-chip {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 20px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Expandable failure reasons per clip */
+.clip-detail-reasons-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.clip-detail-reasons-toggle {
+  font-size: 11px;
+  color: var(--amber);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  padding: 2px 0;
+}
+
+.clip-detail-reasons-toggle::-webkit-details-marker { display: none; }
+
+.clip-detail-reasons-body {
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--amber) 10%, transparent);
+  border-left: 2px solid var(--amber);
+}
+
+.clip-detail-reason {
+  font-size: 11px;
+  color: var(--text-2);
+  line-height: 1.5;
+  margin: 0 0 2px;
+}
+
+.clip-detail-reason:last-child { margin-bottom: 0; }
+
+/* ── Didn't-pass card — correction note ─────────────────────────────────────── */
+
+.fail-correction-note {
+  font-size: 11px;
+  color: var(--amber);
+  margin: 6px 0 0;
+  opacity: 0.85;
+}
+
+/* ── Reduced-motion overrides for all new additions ─────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .clip-detail-reasons-wrap details[open] .clip-detail-reasons-body {
+    animation: none;
+  }
+}

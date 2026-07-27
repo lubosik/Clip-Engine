@@ -102,5 +102,5 @@ class TestGateConfig:
     def test_fitness_yaml_stays_strict(self):
         from core.config import load_campaign
 
-        cfg = load_campaign("campaigns/fitness.yaml", strict_assets=False)
+        cfg = load_campaign("tests/fixtures/test_campaign.yaml", strict_assets=False)
         assert cfg.gate.relaxed_safety_checks == []

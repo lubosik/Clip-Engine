@@ -72,7 +72,7 @@ def test_process_source_leaves_status_on_transcript_fetch_error(tmp_path, monkey
         from core.db import _get_engine
         Base.metadata.create_all(_get_engine())
 
-        cfg = load_campaign(Path("campaigns") / "fitness.yaml", strict_assets=False)
+        cfg = load_campaign(Path("tests") / "fixtures" / "test_campaign.yaml", strict_assets=False)
 
         with get_session() as session:
             ensure_campaign(session, cfg.name, enabled=True, config_snapshot=None)

@@ -34,7 +34,7 @@ DEFAULT_YOUTUBE_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"  # "Me at th
 
 SMOKE_START = 0.0
 SMOKE_END = 19.0       # keep under 20 s for speed
-SMOKE_CAMPAIGN = "fitness"
+SMOKE_CAMPAIGN = "peptides"
 
 
 def _download_video(url: str, dest: Path) -> None:
@@ -95,7 +95,7 @@ def _stub_clip_candidate(start: float, end: float) -> dict:
 
 
 def _load_smoke_campaign():
-    """Load the fitness campaign config (or any available campaign)."""
+    """Load the peptides campaign config (or any available campaign)."""
     from core.config import load_campaign, load_enabled_campaigns
     yaml_path = Path("campaigns") / f"{SMOKE_CAMPAIGN}.yaml"
     if yaml_path.exists():

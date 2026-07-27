@@ -169,6 +169,11 @@ export const api = {
     return request('GET', '/api/sources?in_progress=1');
   },
 
+  // Add-video pipeline — POST /api/campaigns/{name}/videos
+  addVideo(campaign, body) {
+    return request('POST', `/api/campaigns/${encodeURIComponent(campaign)}/videos`, { body });
+  },
+
   // Approval-rate time series — GET /api/analytics/approval-rate?campaign=X&weeks=N
   getApprovalRate(campaign, weeks = 8) {
     const qs = new URLSearchParams({ campaign, weeks: String(weeks) });

@@ -376,6 +376,7 @@ function _makeCtx() {
     onBadge: _updateQueueBadge,
     onUnauthorized: _onUnauthorized,
     goToAnalytics: () => _activateTab('analytics'),
+    goToSources:   () => _activateTab('sources'),
   };
 }
 

@@ -594,10 +594,22 @@ function _buildFailCard(clip, idx) {
   el.dataset.id   = clip.id;
   el.dataset.kind = kind;
 
-  const failReasons = (clip.gate_reasons || [])
+  // Gate reasons (critic failures)
+  const gateLines = (clip.gate_reasons || [])
     .filter((r) => !r.pass)
-    .map((r) => _escHtml(r.reason || r.check))
-    .join('<br>');
+    .map((r) => _escHtml(r.reason || r.check));
+
+  // Judge decision reasons (deterministic final verdict)
+  const judgeLines = Array.isArray(clip.judge_decision?.reasons)
+    ? clip.judge_decision.reasons.map((r) => _escHtml(r))
+    : [];
+
+  const failReasons = [...gateLines, ...judgeLines].join('<br>');
+
+  // Correction attempts note
+  const correctionNote = (clip.correction_attempts > 0)
+    ? `<p class="fail-correction-note">${clip.correction_attempts} correction${clip.correction_attempts !== 1 ? 's' : ''} attempted</p>`
+    : '';
 
   const formulaLabel = clip.formula_score != null
     ? `<span class="chip chip-amber">Score ${Math.round(clip.formula_score * 100)}/100</span>`
@@ -634,6 +646,7 @@ function _buildFailCard(clip, idx) {
           </summary>
           <div class="fail-why-reasons">${failReasons || 'Gate reason not recorded.'}</div>
         </details>
+        ${correctionNote}
         <div class="fail-card-actions">
           <button class="btn btn-ghost btn-sm fail-override-btn" data-id="${_escHtml(clip.id)}"
             aria-label="Override gate — move to review queue">

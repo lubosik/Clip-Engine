@@ -5,7 +5,7 @@ PYTHON  := .venv/bin/python
 PYTEST  := .venv/bin/pytest
 MODAL   := .venv/bin/modal
 
-.PHONY: healthcheck smoke demo test deploy-modal upload-hero eval-segmentation
+.PHONY: healthcheck smoke demo test deploy-modal upload-hero eval-segmentation simulate-pipeline
 
 # ── System readiness check ──────────────────────────────────────────────────
 # Verifies Postgres, R2 (put/get/delete), Apify, Postiz, and Modal (token +
@@ -21,10 +21,10 @@ smoke:
 	$(PYTHON) scripts/smoke.py
 
 # ── Full demo-mode pipeline ─────────────────────────────────────────────────
-# Runs the fitness campaign end-to-end in demo mode, capped at $2 Apify and
+# Runs the peptides campaign end-to-end in demo mode, capped at $2 Apify and
 # $2 Modal spend.  Real clips land in R2; queue shows them tagged 'demo'.
 demo:
-	$(PYTHON) -m producer.run fitness --mode demo --max-apify-spend 2 --max-modal-spend 2
+	$(PYTHON) -m producer.run peptides --mode demo --max-apify-spend 2 --max-modal-spend 2
 
 # ── Test suite ───────────────────────────────────────────────────────────────
 test:
@@ -49,3 +49,10 @@ upload-hero:
 # Exits 1 if any hard assertion (sentence-boundary alignment) fails.
 eval-segmentation:
 	$(PYTHON) scripts/eval_segmentation.py --verbose
+
+# ── Offline pipeline simulation harness (§8) ────────────────────────────────
+# Runs all 7 add-video pipeline scenarios fully offline (zero network, zero LLM,
+# zero GPU). Tripwires prevent any real transport calls. Exit 1 if any scenario
+# fails; exit 0 only at 100%.
+simulate-pipeline:
+	$(PYTHON) scripts/simulate_pipeline.py

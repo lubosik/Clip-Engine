@@ -215,6 +215,17 @@ function _buildCampaignCard(c) {
         </svg>
         Memes
       </button>
+    </div>
+    <div class="campaign-add-video-row">
+      <button class="btn btn-secondary btn-sm add-video-btn" type="button"
+        aria-label="Add YouTube video to ${_esc(c.name)} campaign">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+          <line x1="12" y1="5" x2="12" y2="19"/>
+          <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+        Add video
+      </button>
     </div>`;
 
   // Wire engine toggle buttons — stop propagation so card click doesn't fire
@@ -225,6 +236,15 @@ function _buildCampaignCard(c) {
       const btn = e.target.closest('.engine-btn');
       if (!btn) return;
       _toggleEngine(c, btn, engines);
+    });
+  }
+
+  // Wire Add Video button — stop propagation so card click doesn't open wizard
+  const addVideoBtn = card.querySelector('.add-video-btn');
+  if (addVideoBtn) {
+    addVideoBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _openAddVideoSheet(c);
     });
   }
 
@@ -514,7 +534,7 @@ function _buildStep1(body) {
     <div class="form-group">
       <label class="form-label" for="wiz-name">Campaign name *</label>
       <input id="wiz-name" type="text" class="form-control"
-        value="${_esc(_wiz.name)}" placeholder="e.g. fitness"
+        value="${_esc(_wiz.name)}" placeholder="e.g. peptides"
         autocapitalize="none" autocorrect="off">
       <p class="form-hint">Lowercase, no spaces. This becomes the YAML filename.</p>
     </div>
@@ -582,7 +602,7 @@ function _buildStep2(body) {
       <div class="form-group mb-0">
         <label class="form-label">Hashtags</label>
         <div id="tt-hashtag-tags" class="tag-input-wrap"></div>
-        <p class="form-hint">Without #. E.g. fitnesstips</p>
+        <p class="form-hint">Without #. E.g. peptidetips</p>
       </div>
     </div>
 
@@ -901,7 +921,7 @@ function _buildStep5(body) {
     <div class="form-group">
       <label class="form-label">Hashtags</label>
       <div id="dest-hashtag-tags" class="tag-input-wrap"></div>
-      <p class="form-hint">Include the # prefix. E.g. #fitness</p>
+      <p class="form-hint">Include the # prefix. E.g. #peptides</p>
     </div>
 
     <div class="form-group">
@@ -1300,6 +1320,213 @@ function _skeletonList() {
       <div class="skeleton" style="height:12px;width:50%;margin-top:6px;"></div>
     </div>`;
   return s() + s();
+}
+
+// ── Add-video sheet ───────────────────────────────────────────────────────────
+
+/**
+ * Open a bottom sheet for adding a YouTube video URL to a campaign.
+ * POST /api/campaigns/{name}/videos on submit.
+ * 409 → "Re-clip anyway" force option.
+ *
+ * @param {{ name: string, mode: string }} campaign
+ */
+function _openAddVideoSheet(campaign) {
+  // Close any existing add-video sheet
+  document.querySelector('.av-sheet-backdrop')?.remove();
+
+  const mode = campaign.mode || 'production';
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheet-backdrop av-sheet-backdrop';
+
+  backdrop.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <div class="sheet-title">Add video — ${_esc(campaign.name)}</div>
+      </div>
+      <div class="sheet-body av-sheet-body">
+        <div class="form-group">
+          <label class="form-label" for="av-url-input">YouTube URL *</label>
+          <input id="av-url-input" type="url" class="form-control"
+            placeholder="https://youtube.com/watch?v=…"
+            autocapitalize="none" autocorrect="off" autocomplete="off"
+            inputmode="url">
+          <p class="form-hint">Accepts youtube.com/watch, youtu.be, or /shorts/ links.</p>
+        </div>
+        <div class="form-group mb-0">
+          <button class="btn btn-ghost av-advanced-toggle" type="button"
+            aria-expanded="false" aria-controls="av-advanced-panel"
+            style="padding:0 2px;color:var(--text-3);font-size:12px;min-height:36px;gap:5px;">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2.5" stroke-linecap="round" aria-hidden="true"
+                 class="av-adv-chevron">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+            Advanced
+          </button>
+          <div id="av-advanced-panel" class="av-advanced-panel" hidden>
+            <div class="wizard-sub-section" style="margin-top:10px">
+              <div class="form-group">
+                <label class="form-label" for="av-mode">Mode</label>
+                <select id="av-mode" class="form-control">
+                  <option value="demo" ${mode === 'demo' ? 'selected' : ''}>Demo</option>
+                  <option value="production" ${mode === 'production' ? 'selected' : ''}>Production</option>
+                </select>
+                <p class="form-hint">Defaults to this campaign's own mode.</p>
+              </div>
+              <div class="form-row">
+                <div class="form-group mb-0">
+                  <label class="form-label">Max Apify ($)</label>
+                  <input id="av-apify" type="number" class="form-control"
+                    placeholder="server default" min="0" step="0.5">
+                </div>
+                <div class="form-group mb-0">
+                  <label class="form-label">Max Modal ($)</label>
+                  <input id="av-modal" type="number" class="form-control"
+                    placeholder="server default" min="0" step="0.5">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="sheet-footer">
+        <button class="btn btn-secondary" id="av-cancel-btn" type="button">Cancel</button>
+        <button class="btn btn-primary" id="av-clip-btn" type="button">Clip it</button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(backdrop);
+  requestAnimationFrame(() => requestAnimationFrame(() => backdrop.classList.add('open')));
+
+  // Close on backdrop click
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) _avClose(backdrop);
+  });
+
+  // Cancel button
+  backdrop.querySelector('#av-cancel-btn').addEventListener('click', () => _avClose(backdrop));
+
+  // Advanced section toggle
+  const advToggle  = backdrop.querySelector('.av-advanced-toggle');
+  const advPanel   = backdrop.querySelector('#av-advanced-panel');
+  const advChevron = backdrop.querySelector('.av-adv-chevron');
+  advToggle.addEventListener('click', () => {
+    const expanded = advToggle.getAttribute('aria-expanded') === 'true';
+    advToggle.setAttribute('aria-expanded', String(!expanded));
+    advPanel.hidden = expanded;
+    advChevron.style.transform = expanded ? '' : 'rotate(180deg)';
+  });
+
+  // Submit logic
+  const clipBtn  = backdrop.querySelector('#av-clip-btn');
+  const urlInput = backdrop.querySelector('#av-url-input');
+
+  const submit = async (force) => {
+    const urlVal = (urlInput?.value || '').trim();
+    if (!_validateYouTubeUrl(urlVal)) {
+      _ctx.toast('Enter a valid YouTube URL (watch, youtu.be, or /shorts/)', 'error');
+      urlInput?.focus();
+      return;
+    }
+
+    clipBtn.disabled = true;
+    clipBtn.innerHTML = '<span class="spinner"></span>';
+
+    /** @type {{ url: string, force?: boolean, mode?: string, max_apify_spend?: number, max_modal_spend?: number }} */
+    const body = { url: urlVal };
+    if (force) body.force = true;
+
+    const modeEl  = backdrop.querySelector('#av-mode');
+    const apifyEl = backdrop.querySelector('#av-apify');
+    const modalEl = backdrop.querySelector('#av-modal');
+    if (modeEl?.value)  body.mode = modeEl.value;
+    if (apifyEl?.value) body.max_apify_spend = parseFloat(apifyEl.value);
+    if (modalEl?.value) body.max_modal_spend = parseFloat(modalEl.value);
+
+    try {
+      await _ctx.mockFetch(
+        () => _ctx.api.addVideo(campaign.name, body),
+        () => ({ started: true })
+      );
+      _ctx.toast('Clipping started — check Sources tab', 'success', 4500);
+      _avClose(backdrop);
+      _ctx.goToSources();
+    } catch (err) {
+      clipBtn.disabled = false;
+      clipBtn.textContent = 'Clip it';
+
+      if (err.status === 401) { _avClose(backdrop); _ctx.onUnauthorized(); return; }
+
+      if (err.status === 409) {
+        _avShowForce(backdrop, () => submit(true));
+        return;
+      }
+
+      _ctx.toast(err.message || 'Failed to start clipping', 'error');
+    }
+  };
+
+  clipBtn.addEventListener('click', () => submit(false));
+  urlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submit(false); }
+  });
+
+  // Focus the URL input on open
+  setTimeout(() => urlInput?.focus(), 80);
+}
+
+function _avClose(backdrop) {
+  backdrop.classList.remove('open');
+  setTimeout(() => backdrop.remove(), 310);
+}
+
+function _avShowForce(backdrop, onForce) {
+  // Remove duplicate if already shown
+  backdrop.querySelector('.av-force-wrap')?.remove();
+
+  const wrap = document.createElement('div');
+  wrap.className = 'av-force-wrap';
+  wrap.innerHTML = `
+    <div class="source-stage-error" style="margin-bottom:10px">
+      <p class="source-error-text">
+        This video was already fully processed for this campaign.
+      </p>
+    </div>
+    <button class="btn btn-secondary btn-full" id="av-reclip-btn" type="button">
+      Re-clip anyway
+    </button>`;
+
+  const sheetBody = backdrop.querySelector('.av-sheet-body');
+  if (sheetBody) sheetBody.appendChild(wrap);
+
+  backdrop.querySelector('#av-reclip-btn').addEventListener('click', onForce);
+}
+
+/**
+ * Returns true for youtube.com/watch?v=, youtu.be/, and youtube.com/shorts/ URLs.
+ * @param {string} url
+ * @returns {boolean}
+ */
+function _validateYouTubeUrl(url) {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, '');
+    if (host === 'youtube.com') {
+      if (u.pathname === '/watch' && u.searchParams.has('v')) return true;
+      if (u.pathname.startsWith('/shorts/') && u.pathname.length > '/shorts/'.length) return true;
+      return false;
+    }
+    if (host === 'youtu.be') {
+      return u.pathname.length > 1;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 function _esc(str) {

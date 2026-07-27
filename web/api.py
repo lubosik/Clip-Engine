@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -208,6 +209,9 @@ def _clip_to_dict(clip: Any, base_url: str = "") -> dict[str, Any]:
         "gate_status": getattr(clip, "gate_status", "pending") or "pending",
         "gate_reasons": getattr(clip, "gate_reasons", None),
         "formula_score": getattr(clip, "formula_score", None),
+        # Add-video pipeline fields (migration 007)
+        "judge_decision": getattr(clip, "judge_decision", None),
+        "correction_attempts": getattr(clip, "correction_attempts", 0) or 0,
         "video_url": f"/api/clips/{clip_id}/video",
         "thumb_url": f"/api/clips/{clip_id}/thumb",
     }
@@ -1900,6 +1904,40 @@ def _source_row_to_dict(src: Any, *, session: Any = None) -> dict[str, Any]:
     clips_rejected = sum(1 for c in clips_sorted if c.status == "rejected")
     clips_pending = sum(1 for c in clips_sorted if c.status == "pending_review")
 
+    # Build clips_detail for in-progress sources (contract §6).
+    # Includes correction_attempts, judge decision label, and plain-language
+    # failure reasons sourced from judge_decision.reasons or the most recent
+    # critic_reports failures.
+    def _clip_detail_entry(clip: Any) -> dict[str, Any]:
+        judge_dec: dict | None = getattr(clip, "judge_decision", None)
+        judge_label: str | None = (judge_dec or {}).get("decision") if judge_dec else None
+        if judge_label is not None:
+            last_reasons: list[str] = (judge_dec or {}).get("reasons") or []
+        else:
+            # Pull last_failure_reasons from the most recent critic report
+            critic_list: list | None = getattr(clip, "critic_reports", None)
+            if critic_list:
+                last_report = critic_list[-1] if isinstance(critic_list, list) else None
+                if last_report and isinstance(last_report, dict):
+                    failures = last_report.get("failures") or []
+                    last_reasons = [
+                        f.get("reason", "") for f in failures if isinstance(f, dict)
+                    ]
+                else:
+                    last_reasons = []
+            else:
+                last_reasons = []
+        return {
+            "id": str(clip.id),
+            "gate_status": getattr(clip, "gate_status", "pending") or "pending",
+            "status": clip.status or "pending_review",
+            "correction_attempts": getattr(clip, "correction_attempts", 0) or 0,
+            "last_failure_reasons": last_reasons,
+            "judge": judge_label,
+        }
+
+    clips_detail: list[dict[str, Any]] = [_clip_detail_entry(c) for c in clips_sorted]
+
     stage = getattr(src, "stage", "queued") or "queued"
 
     # Derive display-stage 'complete' opportunistically (contract §2):
@@ -1973,6 +2011,8 @@ def _source_row_to_dict(src: Any, *, session: Any = None) -> dict[str, Any]:
         "clips_rejected": clips_rejected,
         "clips_pending": clips_pending,
         "exhaustion": exhaustion,
+        # Per-clip detail for in-progress sources (contract §6)
+        "clips_detail": clips_detail,
     }
 
 
@@ -2025,7 +2065,7 @@ def list_sources(
                             # not a stale failed source)
                             or_(
                                 Source.stage.in_(
-                                    ["transcribing", "identifying", "rendering", "reviewing"]
+                                    ["transcribing", "identifying", "rendering", "reviewing", "correcting"]
                                 ),
                                 # Failed sources that are recent (< 24h old)
                                 (
@@ -2144,7 +2184,7 @@ async def stream_sources_progress(
                     .filter(
                         or_(
                             Source.stage.in_(
-                                ["transcribing", "identifying", "rendering", "reviewing"]
+                                ["transcribing", "identifying", "rendering", "reviewing", "correcting"]
                             ),
                             (
                                 (Source.stage == "failed")
@@ -2201,6 +2241,265 @@ async def stream_sources_progress(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# /api/campaigns/{name}/videos — add a single YouTube video to a campaign
+# /api/videos/{source_id}/log  — tail the per-video pipeline log
+# Contract: docs/ADD_VIDEO_CONTRACTS.md §6
+# ---------------------------------------------------------------------------
+
+# Default spend caps for on-demand video pipeline runs (same as trigger_run)
+DEFAULT_VIDEO_APIFY_SPEND = 2.0
+DEFAULT_VIDEO_MODAL_SPEND = 3.0
+
+
+@app.post("/api/campaigns/{name}/videos", dependencies=[Depends(require_auth)])
+def add_campaign_video(
+    name: str,
+    body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """POST /api/campaigns/{name}/videos — queue a YouTube URL for clipping.
+
+    Body (all optional except url):
+      url:               str  — YouTube URL (required)
+      mode:              "demo" | "production" (default from campaign)
+      max_apify_spend:   float USD cap (default 2.0)
+      max_modal_spend:   float USD cap (default 3.0)
+      force:             bool — re-clip an already-exhausted source (default false)
+
+    Response:
+      {started: true, source_id, pid, log, mode, max_apify_spend, max_modal_spend}
+
+    Errors:
+      404 — campaign YAML not found
+      409 — source already exhausted and force not set
+      422 — invalid URL or invalid body params
+      500 — spawn failure
+    """
+    _db_required()
+    body = body or {}
+
+    # ── 1. Validate campaign ─────────────────────────────────────────────────
+    slug = slugify(name)
+    campaigns_dir = Path(__file__).resolve().parent.parent / "campaigns"
+    yaml_path = campaigns_dir / f"{slug}.yaml"
+    if not yaml_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail={"error": f"Campaign {name!r} not found", "code": 404},
+        )
+
+    # ── 2. Validate URL ──────────────────────────────────────────────────────
+    url = body.get("url")
+    if not url or not isinstance(url, str) or not url.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "url is required and must be a non-empty string", "code": 422},
+        )
+    url = url.strip()
+
+    # Validate URL shape before spending anything
+    import re as _re
+    _yt_quick = _re.compile(
+        r"(?:https?://)?(?:www\.)?(?:youtube\.com/(?:watch\?.*v=|shorts/)|youtu\.be/)"
+        r"([A-Za-z0-9_-]{11})"
+    )
+    yt_match = _yt_quick.search(url)
+    if not yt_match:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "url must be a YouTube watch, shorts, or youtu.be link",
+                "code": 422,
+            },
+        )
+    vid_id = yt_match.group(1)
+    source_id = f"youtube:{vid_id}"
+
+    # ── 3. Validate optional body params ─────────────────────────────────────
+    run_mode = body.get("mode")
+    if run_mode is not None and run_mode not in {"demo", "production"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "mode must be 'demo' or 'production'", "code": 422},
+        )
+
+    def _spend_cap(key: str, default: float) -> float:
+        raw = body.get(key)
+        if raw is None:
+            return default
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": f"{key} must be a number", "code": 422},
+            )
+        if val <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": f"{key} must be greater than 0", "code": 422},
+            )
+        return val
+
+    max_apify_spend = _spend_cap("max_apify_spend", DEFAULT_VIDEO_APIFY_SPEND)
+    max_modal_spend = _spend_cap("max_modal_spend", DEFAULT_VIDEO_MODAL_SPEND)
+    force = bool(body.get("force", False))
+
+    # ── 4. 409 check — source already exhausted and no --force ───────────────
+    if not force:
+        try:
+            with get_session() as session:
+                existing = (
+                    session.query(Source)
+                    .filter_by(source_id=source_id)
+                    .first()
+                )
+                if existing and existing.status == "done":
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "error": (
+                                f"Source {source_id!r} is already exhausted. "
+                                "Pass force=true to re-clip."
+                            ),
+                            "code": 409,
+                        },
+                    )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("add_campaign_video: 409 check failed (non-fatal): %s", exc)
+
+    # ── 5. Prepare log file ───────────────────────────────────────────────────
+    log_dir = STORAGE_DIR / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning("Could not create log dir %s: %s", log_dir, exc)
+        log_dir = Path("/tmp")
+
+    log_filename = f"video-{slug}-{vid_id}.log"
+    log_path = log_dir / log_filename
+
+    try:
+        log_fh = log_path.open("a")
+    except OSError:
+        log_fh = subprocess.DEVNULL  # type: ignore[assignment]
+
+    # ── 6. Spawn detached subprocess ─────────────────────────────────────────
+    cmd = [
+        sys.executable, "-m", "producer.video_pipeline",
+        slug,
+        url,
+        "--max-apify-spend", str(max_apify_spend),
+        "--max-modal-spend", str(max_modal_spend),
+    ]
+    if run_mode is not None:
+        cmd += ["--mode", run_mode]
+    if force:
+        cmd += ["--force"]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_fh,
+            stderr=log_fh,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        logger.info(
+            "Spawned video pipeline: campaign=%s source_id=%s pid=%d "
+            "mode=%s apify_cap=%.2f modal_cap=%.2f log=%s",
+            slug, source_id, proc.pid,
+            run_mode or "(campaign default)",
+            max_apify_spend, max_modal_spend, log_path,
+        )
+        return {
+            "started": True,
+            "source_id": source_id,
+            "pid": proc.pid,
+            "log": str(log_path),
+            "mode": run_mode,
+            "max_apify_spend": max_apify_spend,
+            "max_modal_spend": max_modal_spend,
+        }
+    except Exception as exc:
+        logger.error(
+            "Failed to spawn video pipeline for %r: %s", source_id, exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"Failed to start video pipeline: {exc}", "code": 500},
+        )
+
+
+@app.get("/api/videos/{source_id:path}/log", dependencies=[Depends(require_auth)])
+def get_video_log(source_id: str, lines: int = 200) -> dict[str, Any]:
+    """GET /api/videos/{source_id}/log — tail the per-video pipeline log.
+
+    source_id is URL-encoded (e.g. youtube:abc123 → youtube%3Aabc123 or just
+    pass the raw path component — FastAPI path converter handles both).
+
+    Returns last `lines` lines (default 200, capped at 2000).
+    Derives log filename from source_id: video-{campaign_slug}-{vid_id}.log.
+
+    Because we may not know the campaign at read time, this searches for any
+    log file whose name contains the video ID portion of the source_id.
+    """
+    # Normalise source_id — strip leading slashes from path converter
+    source_id = source_id.lstrip("/")
+
+    lines = max(1, min(lines, 2000))
+    log_dir = STORAGE_DIR / "logs"
+
+    # Extract the native video ID to search for
+    vid_id: str | None = None
+    if ":" in source_id:
+        vid_id = source_id.split(":", 1)[1]
+    else:
+        vid_id = source_id
+
+    if not vid_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", vid_id):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "source_id has an invalid video id", "code": 422},
+        )
+
+    # Find the matching log file
+    matched: Path | None = None
+    if log_dir.exists():
+        for candidate in sorted(log_dir.glob(f"video-*-{vid_id}.log")):
+            matched = candidate
+            break  # Take the first match alphabetically
+
+    if matched is None or not matched.exists():
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": f"No video pipeline log found for source_id {source_id!r} yet",
+                "code": 404,
+            },
+        )
+
+    try:
+        with matched.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 1_048_576))
+            tail = fh.read().decode("utf-8", errors="replace").splitlines()[-lines:]
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"Could not read log: {exc}", "code": 500},
+        )
+
+    return {
+        "source_id": source_id,
+        "path": str(matched),
+        "lines": tail,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -79,6 +79,7 @@ function _stageLabel(src) {
       const N = clips_identified != null ? clips_identified : '?';
       return `Rendering ${n}/${N}`;
     }
+    case 'correcting':   return 'Correcting';
     case 'reviewing': {
       const n = clips_approved || 0;
       const N = clips_rendered || 0;
@@ -100,6 +101,7 @@ function _stagePercent(src) {
       if (!clips_identified || clips_identified === 0) return 35;
       return Math.min(90, 35 + Math.round(55 * ((clips_rendered || 0) / clips_identified)));
     }
+    case 'correcting':   return 80;
     case 'reviewing': {
       const decided = (clips_approved || 0) + (clips_rejected || 0);
       const rendered = clips_rendered || 0;
@@ -109,6 +111,88 @@ function _stagePercent(src) {
     case 'complete': return 100;
     default:         return 0;  // failed or unknown — no bar
   }
+}
+
+// ── Per-clip detail helpers (clips_detail from SSE payload §6) ────────────────
+
+/**
+ * Derive a display state from a clips_detail item.
+ * Fields: {id, gate_status, status, correction_attempts, last_failure_reasons, judge}
+ *
+ * @param {{ judge: string|null, correction_attempts: number, gate_status: string }} clip
+ * @returns {{ label: string, cls: string }}
+ */
+function _clipDetailState(clip) {
+  if (clip.judge === 'approved') {
+    return { label: 'ready', cls: 'chip-accent' };
+  }
+  if (clip.judge === 'escalate_to_human' || clip.judge === 'rejected') {
+    return { label: "didn't pass", cls: 'chip-amber' };
+  }
+  // judge is null — clip is still in-flight
+  if (clip.correction_attempts > 0) {
+    return { label: `correcting (fix ${clip.correction_attempts}/2)`, cls: 'chip-amber' };
+  }
+  if (clip.gate_status === 'pending') {
+    return { label: 'rendering', cls: '' };
+  }
+  return { label: 'reviewing', cls: '' };
+}
+
+/**
+ * Build the aggregate summary line from clips_detail counts.
+ *
+ * @param {Array<{ judge: string|null, correction_attempts: number, gate_status: string }>} clips
+ * @returns {string}
+ */
+function _clipsDetailSummary(clips) {
+  const N = clips.length;
+  const ready      = clips.filter((c) => c.judge === 'approved').length;
+  const correcting = clips.filter((c) => !c.judge && c.correction_attempts > 0).length;
+  const rendering  = clips.filter((c) => !c.judge && c.correction_attempts === 0 && c.gate_status === 'pending').length;
+
+  const parts = [`found ${N} clip${N !== 1 ? 's' : ''}`];
+  if (rendering  > 0) parts.push(`rendering (${rendering}/${N})`);
+  if (correcting > 0) parts.push(`correcting (${correcting})`);
+  if (ready      > 0) parts.push(`ready (${ready}/${N})`);
+  return parts.join(' · ');
+}
+
+/**
+ * Build HTML for the clips_detail section inside an in-progress source card.
+ *
+ * @param {Array} clipsDetail
+ * @returns {string}
+ */
+function _buildClipsDetailHtml(clipsDetail) {
+  if (!Array.isArray(clipsDetail) || clipsDetail.length === 0) return '';
+
+  const aggregate = _clipsDetailSummary(clipsDetail);
+
+  const rows = clipsDetail.map((clip) => {
+    const { label, cls } = _clipDetailState(clip);
+    const hasReasons = Array.isArray(clip.last_failure_reasons) && clip.last_failure_reasons.length > 0;
+
+    const reasonsHtml = hasReasons
+      ? clip.last_failure_reasons.map((r) => `<p class="clip-detail-reason">${_esc(r)}</p>`).join('')
+      : '';
+
+    return `
+      <div class="clip-detail-row">
+        <span class="chip ${cls} clip-detail-chip">${_esc(label)}</span>
+        ${hasReasons ? `
+          <details class="clip-detail-reasons-wrap">
+            <summary class="clip-detail-reasons-toggle">Why?</summary>
+            <div class="clip-detail-reasons-body">${reasonsHtml}</div>
+          </details>` : ''}
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="source-clips-detail">
+      <div class="source-clips-aggregate">${_esc(aggregate)}</div>
+      ${rows}
+    </div>`;
 }
 
 // ── In-progress card builder ──────────────────────────────────────────────────
@@ -177,6 +261,7 @@ function _buildProgressCard(src) {
         </div>
         ${barHtml}
         ${identifiedHtml}
+        ${Array.isArray(src.clips_detail) && src.clips_detail.length ? _buildClipsDetailHtml(src.clips_detail) : ''}
         ${errorHtml}
       </div>
     </article>`;

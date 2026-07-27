@@ -37,7 +37,7 @@ class YouTubeSourceConfig(BaseModel):
     # Optional blocklist: channel name substrings to skip (case-insensitive).
     # Matched against the candidate's author_handle / channelName field.
     # Example: ["BadChannel", "spammer123"]
-    # Note: do NOT edit campaigns/fitness.yaml; this key is supported in new campaigns.
+    # Note: supported in new campaigns.
     exclude_channels: list[str] = Field(default_factory=list)
 
     @field_validator("uploaded_within")

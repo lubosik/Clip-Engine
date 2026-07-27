@@ -198,6 +198,15 @@ class Clip(Base):
     # Preference profile version active when this clip was ranked (learning loop)
     profile_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Add-video pipeline columns (migration 007):
+    # correction_attempts: how many critic-driven re-renders have occurred (max 2)
+    correction_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # critic_reports: list[CriticReport.model_dump()] appended per render attempt
+    critic_reports: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # judge_decision: JudgeDecision.model_dump() — written exactly once after loop ends
+    judge_decision: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

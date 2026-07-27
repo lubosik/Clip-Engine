@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).parent.parent
-FITNESS_YAML = PROJECT_ROOT / "campaigns" / "fitness.yaml"
+FITNESS_YAML = PROJECT_ROOT / "tests" / "fixtures" / "test_campaign.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +162,7 @@ class TestConfigNewFields:
         """fitness.yaml must still load cleanly after the new field additions."""
         from core.config import load_campaign
         cfg = load_campaign(FITNESS_YAML, strict_assets=False)
-        assert cfg.name == "fitness"
+        assert cfg.name == "testcamp"
         assert cfg.enabled is True
 
     def test_invalid_mode_rejected(self):

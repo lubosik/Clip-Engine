@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>John quote card</title>
+    <style>
+      :root {
+        --canvas-width: 1080px;
+        --canvas-height: 1350px;
+        --edge: 64px;
+        --panel-width: 824px;
+        --panel-min-height: 380px;
+        --panel-pad-x: 54px;
+        --panel-pad-y: 48px;
+        --glass-background: rgba(255, 255, 255, 0.1);
+        --glass-tint: rgba(255, 255, 255, 0);
+        --glass-border: rgba(255, 255, 255, 0.18);
+        --ink-primary: #ffffff;
+        --ink-secondary: rgba(255, 255, 255, 0.94);
+        --ink-tertiary: rgba(255, 255, 255, 0.9);
+        --champagne: #d6b783;
+        --accent: var(--champagne);
+        --shadow: rgba(0, 0, 0, 0.34);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #090b0e;
+      }
+
+      body {
+        display: grid;
+        place-items: start;
+      }
+
+      .canvas {
+        position: relative;
+        isolation: isolate;
+        width: var(--canvas-width);
+        height: var(--canvas-height);
+        overflow: hidden;
+        background: #090b0e;
+        transform: scale(var(--render-scale, 1));
+        transform-origin: top left;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: geometricPrecision;
+      }
+
+      .photo {
+        position: absolute;
+        inset: 0;
+        z-index: -2;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        object-position: var(--photo-position, 50% 50%);
+      }
+
+      .glass-panel {
+        position: absolute;
+        isolation: isolate;
+        display: flex;
+        flex-direction: column;
+        width: var(--panel-width);
+        min-height: var(--panel-min-height);
+        padding: var(--panel-pad-y) var(--panel-pad-x) 42px;
+        overflow: hidden;
+        color: var(--ink-primary);
+        background: var(--glass-background);
+        border: 1px solid var(--glass-border);
+        border-radius: 30px;
+        box-shadow:
+          0 30px 78px var(--shadow),
+          inset 0 1px 0 rgba(255, 255, 255, 0.24),
+          inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+        backdrop-filter: blur(18px) saturate(180%);
+        -webkit-backdrop-filter: blur(18px) saturate(180%);
+      }
+
+      .glass-panel::before {
+        position: absolute;
+        top: 0;
+        right: 34px;
+        left: 34px;
+        height: 1px;
+        content: "";
+        z-index: 2;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          rgba(255, 255, 255, 0.42) 22%,
+          rgba(255, 255, 255, 0.18) 72%,
+          transparent
+        );
+      }
+
+      .glass-panel::after {
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        content: "";
+        background: var(--glass-tint);
+      }
+
+      .glass-panel[hidden] {
+        display: none;
+      }
+
+      .glass-panel[data-variant="dark"] {
+        --glass-background: rgba(0, 0, 0, 0.38);
+        --shadow: rgba(0, 0, 0, 0.46);
+      }
+
+      .glass-panel[data-tone="dark"] {
+        --ink-primary: #090b0d;
+        --ink-secondary: rgba(9, 11, 13, 0.92);
+        --ink-tertiary: rgba(9, 11, 13, 0.88);
+      }
+
+      .glass-panel[data-layout="compact"] {
+        --panel-width: 724px;
+        --panel-min-height: 336px;
+        --panel-pad-x: 46px;
+        --panel-pad-y: 40px;
+        padding-bottom: 36px;
+      }
+
+      .glass-panel[data-layout="compact"] .identity {
+        gap: 16px;
+        margin-bottom: 22px;
+        font-size: 21px;
+      }
+
+      .glass-panel[data-layout="compact"] .avatar {
+        width: 62px;
+        height: 62px;
+      }
+
+      .glass-panel[data-layout="compact"] .quote {
+        max-width: 620px;
+        font-size: 52px;
+      }
+
+      .glass-panel[data-layout="compact"] .footer {
+        padding-top: 26px;
+        font-size: 19px;
+      }
+
+      .glass-panel[data-layout="side"] {
+        --panel-width: 454px;
+        --panel-min-height: 390px;
+        --panel-pad-x: 36px;
+        --panel-pad-y: 34px;
+        padding-bottom: 32px;
+      }
+
+      .glass-panel[data-layout="side"] .identity {
+        gap: 14px;
+        margin-bottom: 20px;
+        font-size: 17px;
+        letter-spacing: 0.11em;
+      }
+
+      .glass-panel[data-layout="side"] .avatar {
+        width: 54px;
+        height: 54px;
+      }
+
+      .glass-panel[data-layout="side"] .quote {
+        max-width: 382px;
+        font-size: 44px;
+        line-height: 1.02;
+      }
+
+      .glass-panel[data-layout="side"] .footer {
+        gap: 10px;
+        padding-top: 24px;
+        font-size: 17px;
+      }
+
+      .glass-panel[data-position="lower-left"] {
+        bottom: 68px;
+        left: var(--edge);
+      }
+
+      .glass-panel[data-position="lower-center"] {
+        bottom: 68px;
+        left: 50%;
+        transform: translateX(-50%);
+      }
+
+      .glass-panel[data-position="lower-right"] {
+        right: var(--edge);
+        bottom: 68px;
+      }
+
+      .glass-panel[data-position="middle-left"] {
+        top: 50%;
+        left: var(--edge);
+        transform: translateY(-50%);
+      }
+
+      .glass-panel[data-position="middle-center"] {
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+      }
+
+      .glass-panel[data-position="middle-right"] {
+        top: 50%;
+        right: var(--edge);
+        transform: translateY(-50%);
+      }
+
+      .glass-panel[data-position="upper-left"] {
+        top: 68px;
+        left: var(--edge);
+      }
+
+      .glass-panel[data-position="upper-center"] {
+        top: 68px;
+        left: 50%;
+        transform: translateX(-50%);
+      }
+
+      .glass-panel[data-position="upper-right"] {
+        top: 68px;
+        right: var(--edge);
+      }
+
+      .identity {
+        display: flex;
+        position: relative;
+        z-index: 1;
+        align-items: center;
+        gap: 20px;
+        margin: 0 0 29px;
+        font-family: "Liberation Sans Narrow", "Arial Narrow", sans-serif;
+        font-size: 23px;
+        font-weight: 700;
+        line-height: 1;
+        letter-spacing: 0.15em;
+        text-transform: uppercase;
+        color: var(--ink-secondary);
+      }
+
+      .avatar {
+        flex: none;
+        width: 74px;
+        height: 74px;
+        object-fit: cover;
+        object-position: center;
+        background: rgba(255, 255, 255, 0.08);
+        border: 2px solid rgba(255, 255, 255, 0.56);
+        border-radius: 50%;
+        box-shadow:
+          0 10px 26px rgba(0, 0, 0, 0.24),
+          inset 0 1px 0 rgba(255, 255, 255, 0.36);
+      }
+
+      .quote {
+        position: relative;
+        z-index: 1;
+        max-width: 690px;
+        margin: 0;
+        font-family: "Bitstream Charter", Charter, Georgia, serif;
+        font-size: 60px;
+        font-weight: 500;
+        line-height: 1.04;
+        letter-spacing: -0.032em;
+        text-wrap: balance;
+        text-shadow:
+          0 1px 1px rgba(0, 0, 0, 0.3),
+          0 4px 18px rgba(0, 0, 0, 0.38);
+      }
+
+      .glass-panel[data-tone="dark"] .quote {
+        text-shadow:
+          0 1px 0 rgba(255, 255, 255, 0.58),
+          0 3px 12px rgba(255, 255, 255, 0.2);
+      }
+
+      .footer {
+        display: flex;
+        position: relative;
+        z-index: 1;
+        align-items: center;
+        gap: 12px;
+        margin-top: auto;
+        padding-top: 34px;
+        font-family: "Liberation Sans", Arial, sans-serif;
+        font-size: 21px;
+        font-weight: 600;
+        line-height: 1;
+        letter-spacing: 0.025em;
+        color: var(--ink-tertiary);
+      }
+
+      .footer-mark {
+        width: 5px;
+        height: 5px;
+        background: var(--accent);
+        border-radius: 50%;
+      }
+
+      .canvas[data-format="story"] {
+        --canvas-height: 1920px;
+        --edge: 72px;
+        --panel-width: 936px;
+        --panel-min-height: 430px;
+        --panel-pad-x: 60px;
+        --panel-pad-y: 54px;
+      }
+
+      .canvas[data-format="story"] .glass-panel[data-position^="lower"] {
+        bottom: 92px;
+      }
+
+      .canvas[data-format="story"] .quote {
+        max-width: 770px;
+        font-size: 68px;
+      }
+
+      .canvas[data-format="story"] .identity {
+        font-size: 25px;
+      }
+
+      .canvas[data-format="story"] .footer {
+        font-size: 23px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="canvas" id="canvas" data-format="feed" aria-label="John quote card">
+      <img class="photo" id="photo" alt="" />
+      <article class="glass-panel" id="panel" data-variant="light" data-position="lower-left">
+        <div class="identity">
+          <img class="avatar" id="avatar" alt="" />
+          <span id="handle"></span>
+        </div>
+        <blockquote class="quote" id="quote"></blockquote>
+        <p class="footer"><span class="footer-mark" aria-hidden="true"></span><span id="follow"></span></p>
+      </article>
+    </main>
+
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      const canvas = document.getElementById("canvas");
+      const photo = document.getElementById("photo");
+      const panel = document.getElementById("panel");
+      const avatar = document.getElementById("avatar");
+
+      const format = params.get("format") === "story" ? "story" : "feed";
+      const variant = params.get("variant") === "dark" ? "dark" : "light";
+      const tone = params.get("tone") === "dark" ? "dark" : "light";
+      const allowedLayouts = new Set(["standard", "compact", "side"]);
+      const requestedLayout = params.get("layout") || "standard";
+      const allowedPositions = new Set([
+        "upper-left", "upper-center", "upper-right",
+        "middle-left", "middle-center", "middle-right",
+        "lower-left", "lower-center", "lower-right"
+      ]);
+      const requestedPosition = params.get("position") || "lower-left";
+
+      canvas.dataset.format = format;
+      const renderScale = Math.max(1, Math.min(4, Number(params.get("renderScale")) || 1));
+      canvas.style.setProperty("--render-scale", String(renderScale));
+      panel.dataset.variant = variant;
+      panel.dataset.tone = tone;
+      panel.dataset.layout = allowedLayouts.has(requestedLayout) ? requestedLayout : "standard";
+      panel.dataset.position = allowedPositions.has(requestedPosition) ? requestedPosition : "lower-left";
+      panel.hidden = params.get("panel") === "false";
+      panel.style.setProperty("--glass-tint", params.get("tint") || "rgba(255,255,255,0)");
+      panel.style.setProperty("--accent", params.get("accent") || "#d6b783");
+      photo.src = params.get("image") || "";
+      const avatarSource = params.get("avatar") || "";
+      if (avatarSource) avatar.src = avatarSource;
+      photo.style.setProperty("--photo-position", params.get("photoPosition") || "50% 50%");
+      document.getElementById("quote").textContent = params.get("quote") || "";
+      document.getElementById("handle").textContent = params.get("handle") || "";
+      document.getElementById("follow").textContent = params.get("follow") || "Follow for more";
+
+      const ready = [document.fonts.ready, photo.decode()];
+      if (avatarSource) ready.push(avatar.decode());
+      Promise.all(ready).then(() => {
+        window.__CARD_READY__ = true;
+      }).catch((error) => {
+        document.body.dataset.renderError = String(error);
+        window.__CARD_READY__ = false;
+      });
+    </script>
+  </body>
+</html>
