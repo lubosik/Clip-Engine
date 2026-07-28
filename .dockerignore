@@ -5,6 +5,10 @@ __pycache__
 *.pyc
 .pytest_cache
 tests/
+# Re-include runtime fixtures: core/fewshot.py loads the boundary few-shot
+# pairs at runtime; Dockerfile COPYs tests/fixtures/.
+!tests/fixtures/
+!tests/fixtures/**
 *.md
 !assets/**/*.md
 deploy/Dockerfile.web
