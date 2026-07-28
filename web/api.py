@@ -462,6 +462,35 @@ async def create_campaign(
     return {"name": slug, "yaml_path": str(yaml_path)}
 
 
+def _load_existing_campaign_dict(slug: str) -> dict[str, Any] | None:
+    """Raw yaml dict for an existing campaign (None if absent/unreadable)."""
+    try:
+        import yaml
+
+        path = Path(__file__).resolve().parent.parent / "campaigns" / f"{slug}.yaml"
+        if not path.exists():
+            return None
+        with path.open() as fh:
+            data = yaml.safe_load(fh)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _deep_merge_config(base: dict, incoming: dict) -> dict:
+    """Recursive dict merge: incoming keys win, missing keys keep base values.
+
+    Lists and scalars are replaced wholesale by incoming.
+    """
+    out = dict(base)
+    for k, v in incoming.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge_config(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 @app.put("/api/campaigns/{name}", dependencies=[Depends(require_auth)])
 async def update_campaign(
     name: str,
@@ -486,6 +515,15 @@ async def update_campaign(
         )
     # Force slug to match URL param.
     config_dict["name"] = slugify(name)
+
+    # Deep-merge onto the EXISTING yaml so fields the wizard doesn't manage
+    # (analytics, gate.relaxed_safety_checks, ranking.stance, source
+    # exclusions, caption fonts, hook box colors, ...) survive a save instead
+    # of being silently wiped. Incoming keys win; missing keys keep their
+    # current values.
+    existing = _load_existing_campaign_dict(config_dict["name"])
+    if existing:
+        config_dict = _deep_merge_config(existing, config_dict)
 
     async def _read(upload: UploadFile | None) -> tuple[bytes | None, str]:
         if upload is None:

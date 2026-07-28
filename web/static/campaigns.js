@@ -217,14 +217,14 @@ function _buildCampaignCard(c) {
       </button>
     </div>
     <div class="campaign-add-video-row">
-      <button class="btn btn-secondary btn-sm add-video-btn" type="button"
+      <button class="btn btn-primary add-video-btn" type="button"
         aria-label="Add YouTube video to ${_esc(c.name)} campaign">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
           <line x1="12" y1="5" x2="12" y2="19"/>
           <line x1="5" y1="12" x2="19" y2="12"/>
         </svg>
-        Add video
+        Add video to <strong>${_esc(c.name)}</strong>
       </button>
     </div>`;
 
@@ -1347,6 +1347,10 @@ function _openAddVideoSheet(campaign) {
         <div class="sheet-title">Add video — ${_esc(campaign.name)}</div>
       </div>
       <div class="sheet-body av-sheet-body">
+        <div class="av-campaign-attribution">
+          Clips from this video will be created for the
+          <span class="av-campaign-chip">${_esc(campaign.name)}</span> campaign.
+        </div>
         <div class="form-group">
           <label class="form-label" for="av-url-input">YouTube URL *</label>
           <input id="av-url-input" type="url" class="form-control"

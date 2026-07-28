@@ -341,7 +341,7 @@ class CampaignConfig(BaseModel):
     ranking: RankingConfig
     template: TemplateConfig
     destinations: DestinationsConfig
-    analytics: AnalyticsConfig
+    analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
     # AI review-gate tuning (optional; defaults keep every safety check strict)
     gate: GateConfig = Field(default_factory=GateConfig)
 

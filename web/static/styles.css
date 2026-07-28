@@ -3383,11 +3383,48 @@ details[open] .source-clips-summary::before {
 .add-video-btn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  min-height: 44px; /* WCAG touch target */
+  justify-content: center;
+  gap: 6px;
+  width: 100%;              /* full card width — impossible to miss */
+  min-height: 48px;         /* WCAG touch target */
   padding: 0 14px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
+  background: linear-gradient(135deg, rgba(0, 229, 255, 0.16), rgba(0, 229, 255, 0.06));
+  border: 1px solid rgba(0, 229, 255, 0.45);
+  color: var(--cyan, #00e5ff);
+  border-radius: 12px;
+  box-shadow: 0 0 18px rgba(0, 229, 255, 0.10);
+}
+
+.add-video-btn:active {
+  transform: scale(0.985);
+}
+
+.add-video-btn strong {
+  font-weight: 800;
+}
+
+/* Attribution line inside the Add-video sheet */
+.av-campaign-attribution {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--text-2, rgba(255, 255, 255, 0.75));
+  background: rgba(0, 229, 255, 0.06);
+  border: 1px solid rgba(0, 229, 255, 0.22);
+  border-radius: 10px;
+  line-height: 1.45;
+}
+
+.av-campaign-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(0, 229, 255, 0.16);
+  border: 1px solid rgba(0, 229, 255, 0.4);
+  color: var(--cyan, #00e5ff);
+  font-weight: 700;
 }
 
 /* ── Add-video sheet internals ───────────────────────────────────────────────── */

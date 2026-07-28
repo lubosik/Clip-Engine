@@ -50,7 +50,16 @@ async function request(method, path, { body, multipart = false } = {}) {
     let message = `HTTP ${res.status}`;
     try {
       const body = await res.json();
-      message = body.detail || body.message || message;
+      const d = body.detail ?? body.message;
+      if (typeof d === 'string') {
+        message = d;
+      } else if (Array.isArray(d)) {
+        // FastAPI validation errors: [{loc, msg, type}, ...]
+        message = d.map((e) => (e && (e.msg || e.message)) || '').filter(Boolean).join('; ') || message;
+      } else if (d && typeof d === 'object') {
+        // This app's HTTPExceptions: {error: "...", code: ...}
+        message = d.error || d.message || JSON.stringify(d);
+      }
     } catch { /* ignore parse error */ }
     const err = new Error(message);
     err.status = res.status;
