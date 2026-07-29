@@ -1264,9 +1264,24 @@ def run_video(
         for c in inserted_clips
     )
 
+    apify_ledger_spend = 0.0
     try:
         with get_session() as session:
             modal_spend = run_modal_spend(session, campaign_name, run_start)
+            # Fallback downloader runs use their own Apify client; pick their
+            # spend up from the ledger so the run result doesn't under-report.
+            from sqlalchemy import func
+
+            from core.models import ApifyRun
+
+            apify_ledger_spend = float(
+                session.query(func.coalesce(func.sum(ApifyRun.cost_usd), 0.0))
+                .filter(
+                    ApifyRun.campaign == campaign_name,
+                    ApifyRun.created_at >= run_start,
+                )
+                .scalar() or 0.0
+            )
     except Exception:
         modal_spend = 0.0
 
@@ -1289,7 +1304,7 @@ def run_video(
         clips_rejected=clips_rejected,
         clips_escalated=clips_escalated,
         total_corrections=total_corrections,
-        apify_spend_usd=apify.total_cost_usd,
+        apify_spend_usd=max(apify.total_cost_usd, apify_ledger_spend),
         modal_spend_usd=modal_spend,
         status="complete",
     )
