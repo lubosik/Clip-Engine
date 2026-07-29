@@ -1238,17 +1238,25 @@ def run_video(
                     float(ranking_cfg.clip_length[1]),
                 )
 
+                n_repaired = 0
+                n_dropped = 0
                 for cand in raw_candidates[:max_clips]:
                     try:
                         # apply_prefilters
                         cand = apply_prefilters(cand, sentence_spans, clip_len)  # type: ignore[assignment]
                         # clip_within_unit
                         cand = clip_within_unit(cand, units, sentence_spans, clip_len=clip_len)
-                        # verify_boundaries
+                        # verify_boundaries (repair-first: adjusted may differ)
                         adjusted, keep = verify_boundaries(cand, sentence_spans, clip_len=clip_len)
                         if keep:
+                            if (
+                                adjusted.get("start") != cand.get("start")
+                                or adjusted.get("end") != cand.get("end")
+                            ):
+                                n_repaired += 1
                             selected.append(adjusted)
                         else:
+                            n_dropped += 1
                             log.info(
                                 "run_video: boundary guard dropped candidate start=%.2f end=%.2f",
                                 cand.get("start", 0), cand.get("end", 0),
@@ -1258,6 +1266,10 @@ def run_video(
                             "run_video: guard error (non-fatal, keeping): %s", guard_exc
                         )
                         selected.append(cand)
+                log.info(
+                    "run_video: boundary verifier: %d repaired, %d dropped, %d clean",
+                    n_repaired, n_dropped, len(selected) - n_repaired,
+                )
             except Exception as det_exc:
                 log.warning(
                     "run_video: deterministic guard setup failed (non-fatal): %s", det_exc
@@ -1669,15 +1681,12 @@ def run_video(
                 update_used_ranges(session, source_id, new_ranges)
             mark_source_status(session, source_id, "done")
 
-            if inserted_clips:
-                set_source_stage(session, source_id, "reviewing")
-                # Emit reviewing stage at source level (all clips submitted)
-                _pipeline_emit_event(
-                    session, source_id, "reviewing", status="running",
-                    detail="All clips rendered — awaiting human review",
-                )
-            else:
-                set_source_stage(session, source_id, "complete")
+            # The PIPELINE is done here — every clip has a judge decision.
+            # Human review happens in the Queue; leaving the source at
+            # 'reviewing' kept it in the live-progress panel forever with a
+            # growing elapsed timer ("Reviewing clip · 2h 17m — stalled?",
+            # operator report 2026-07-30). Terminal stage is 'complete'.
+            set_source_stage(session, source_id, "complete")
 
             # Compute terminal summary for complete event
             n_ready = sum(

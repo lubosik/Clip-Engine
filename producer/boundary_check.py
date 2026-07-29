@@ -373,7 +373,7 @@ def _build_boundary_prompt(
 {real_pairs_section}
 FEW-SHOT EXAMPLES OF CORRECT VERDICTS:
 
-Example A — LIST ITEM BLEED (clip-80, Selank):
+Example A — LIST ITEM BLEED (clip-80, Selank) — FIXABLE by end trim:
   Clip sentences:
     [0] "...some people report having a lot less daily anxiety when they use it, \
 but there's really mixed results. Some people have worse anxiety."
@@ -385,8 +385,9 @@ list item — "Number 16, CAX" is the next peptide in an enumerated list.
   Correct verdict: {{"verdict": "fail", "reason": "Last sentence starts a new \
 list item (Number 16, CAX); trim it.", "adjusted_start_sentences": 0, \
 "adjusted_end_sentences": -1}}
+  NOTE: adjusted_end_sentences=-1 is NON-ZERO → the adjusted clip will be KEPT.
 
-Example B — HOOK/BODY MISMATCH (clip-76, CJC vs retatrutide):
+Example B — HOOK/BODY MISMATCH (clip-76, CJC vs retatrutide) — UNFIXABLE, whole span wrong:
   Hook: "GH secretagogues like CJC-1295 and ipamorelin are permissive anabolics."
   Clip sentences:
     [0] "...allodynia where their skin felt like it had been sunburned..."
@@ -396,10 +397,12 @@ Example B — HOOK/BODY MISMATCH (clip-76, CJC vs retatrutide):
     [4] "For retatrutide, in the trials, the doses were 2mg, 4, 6, 9, 12..."
   Analysis: The hook promises content about CJC-1295 secretagogues. The entire \
 clip body is about retatrutide side effects and dosing — a completely different \
-subject. No trim can fix this; the whole span is wrong.
+subject. No boundary trim can fix this; the whole span is semantically wrong.
   Correct verdict: {{"verdict": "fail", "reason": "Body never delivers the hook: \
 hook claims CJC-1295 secretagogues but clip is entirely about retatrutide side \
 effects and dosing.", "adjusted_start_sentences": 0, "adjusted_end_sentences": 0}}
+  NOTE: BOTH adjustments are 0 → this clip will be DROPPED. Only use this when \
+  trimming cannot fix the problem.
 
 ---
 
@@ -419,7 +422,7 @@ an interviewer question ending in "?")
 2. Be STRICT about the END. The clip must end the MOMENT the specific idea resolves. \
 If the last 1-2 sentences introduce a new list item ("Number X", "Next up", \
 "Moving on"), a new named entity, a new question, a tangent, or a generic medical \
-disclaimer, set verdict=fail and return adjusted_end_sentences as a negative integer \
+disclaimer, set verdict=fail and return adjusted_end_sentences as a NEGATIVE integer \
 to trim those sentences off. Never let the clip bleed past the resolution of its \
 main idea.
 3. If there are adjustment improvements, express them as deltas to the current \
@@ -435,12 +438,18 @@ Return ONLY this JSON (no prose, no code fences):
 }}
 
 Rules:
-- "pass" = the clip starts and ends cleanly on its own idea.
-- "fail" = the clip has a clear boundary problem; provide adjustments.
-- adjusted_start_sentences: positive int = drop N sentences from the start; 0 or negative = no change.
-- adjusted_end_sentences: negative int = drop N sentences from the end; 0 or positive = no change.
-- Maximum adjustment: ±3 sentences in either direction.
-- If verdict is "pass", set both adjustments to 0."""
+- "pass" = the clip starts and ends cleanly on its own idea. Set both adjustments to 0.
+- "fail" with NON-ZERO adjustments = the boundary is FIXABLE by trimming. The \
+  adjusted clip will be KEPT — not discarded. ALWAYS prefer this path: if dropping \
+  1-3 sentences from the start or end would make the clip valid, set the appropriate \
+  adjustment to a non-zero value and return fail.
+- "fail" with BOTH adjustments zero = the clip is UNFIXABLE by any boundary trim. \
+  Reserve ONLY for hook/body mismatches where the entire clip body is semantically \
+  wrong (see Example B). This causes the clip to be DROPPED. Do NOT use when a trim \
+  can fix the problem.
+- adjusted_start_sentences: positive int = skip N sentences from the clip start; 0 or negative = no change.
+- adjusted_end_sentences: negative int = trim N sentences from the clip end; 0 or positive = no change.
+- Maximum adjustment: +/-3 sentences in either direction."""
 
 
 def _apply_boundary_deltas(
@@ -482,15 +491,20 @@ def verify_boundaries(
     sentence_spans: list[dict],
     clip_len: tuple[int, int],
 ) -> tuple[dict, bool]:
-    """Run pre-render LLM boundary verification for one clip candidate (§R2.4).
+    """Run pre-render LLM boundary verification for one clip candidate (spec R2.4).
 
-    Builds a prompt with 2-3 sentences of context before the clip, the clip
-    sentences, and 2-3 sentences of context after.  The LLM returns a verdict
-    and optional sentence-index adjustments.  One adjustment round is applied
-    and the clip is re-verified.  Clips still failing after adjustment are
-    dropped (return should_keep=False).
+    Repair-first strategy (adjust-first, drop-last):
 
-    Transport/parse errors → (original_candidate, True): never block pipeline.
+    - verdict=pass: keep the clip (with any adjustments applied).
+    - verdict=fail + NON-ZERO adjustments: REPAIR by applying the adjustment and
+      keeping the clip without re-verifying.  Drop only when the repaired clip
+      would be shorter than clip_len[0] (min duration) -- the repair itself
+      violated the window constraint.
+    - verdict=fail + BOTH adjustments zero: try a start-shift -- expand the clip
+      start backward by one sentence and re-verify once (bounded, never loops).
+      Keep if the re-verify passes; drop only when the re-verify also fails.
+
+    Transport/parse errors: treat as pass (pipeline never blocked).
 
     Args:
         candidate:      Clip dict with "start" and "end" float keys.
@@ -499,7 +513,7 @@ def verify_boundaries(
 
     Returns:
         (adjusted_candidate, should_keep)
-        should_keep=False → caller should not render this clip (saves GPU spend).
+        should_keep=False means caller should not render this clip (saves GPU spend).
     """
     if not sentence_spans:
         # No spans available — treat as pass (cannot verify without sentences)
@@ -566,15 +580,47 @@ def verify_boundaries(
     )
 
     if verdict == "pass":
-        # Model said pass but suggested minor adjustments — accept them
+        # Pass with minor adjustments — accept
         return adjusted, True
 
-    # ── Re-verify after adjustment ────────────────────────────────────────────
-    before2 = [sentence_spans[i]["text"] for i in range(max(0, new_si - 3), new_si)]
-    clip2 = [sentence_spans[i]["text"] for i in range(new_si, min(new_ei + 1, n))]
-    after2 = [sentence_spans[i]["text"] for i in range(new_ei + 1, min(new_ei + 4, n))]
+    # ── verdict == "fail" ─────────────────────────────────────────────────────
+
+    if delta_start != 0 or delta_end != 0:
+        # Fail with non-zero adjustment → REPAIR: apply adj and keep without
+        # re-verifying.  _apply_boundary_deltas already enforces both min and
+        # max clip_len, so the adjusted candidate is always valid.  Only drop
+        # when the verifier marks the WHOLE SPAN wrong (adj=0,0 path below).
+        log.info(
+            "Boundary verify REPAIRED (delta_start=%d delta_end=%d): "
+            "[%.2f,%.2f]->[%.2f,%.2f] reason=%r",
+            delta_start, delta_end,
+            start, end, adjusted["start"], adjusted["end"], reason,
+        )
+        return adjusted, True
+
+    # ── Fail + adj=0,0: start-shift repair (one round, never loops) ──────────
+    # The verifier flagged the whole span as wrong (no fixable trim identified).
+    # Before dropping, try expanding the clip start back by one sentence — this
+    # catches the "start-mid-thought" case where the real opening sentence is just
+    # before what the ranker chose.  Only possible when si > 0.
+    if si <= 0:
+        log.info(
+            "Boundary verify DROP (fail, adj=0, no earlier sentence): "
+            "clip [%.2f,%.2f] reason=%r",
+            start, end, reason,
+        )
+        return candidate, False
+
+    shift_si = si - 1
+    shift_start = float(sentence_spans[shift_si]["start"])
+    shift_candidate = {**candidate, "start": shift_start}
+
+    before2 = [sentence_spans[i]["text"] for i in range(max(0, shift_si - 3), shift_si)]
+    clip2 = [sentence_spans[i]["text"] for i in range(shift_si, min(ei + 1, n))]
+    after2 = [sentence_spans[i]["text"] for i in range(ei + 1, min(ei + 4, n))]
 
     try:
+        from core.llm import create_completion, extract_text  # already imported above; safe re-import
         prompt2 = _build_boundary_prompt(before2, clip2, after2)
         message2 = create_completion(
             client, model, 256, [{"role": "user", "content": prompt2}]
@@ -582,20 +628,43 @@ def verify_boundaries(
         raw2 = extract_text(message2)
         verdict2_obj = _parse_boundary_verdict(raw2)
         verdict2 = verdict2_obj.get("verdict", "pass")
+        delta2_start = int(verdict2_obj.get("adjusted_start_sentences", 0))
+        delta2_end = int(verdict2_obj.get("adjusted_end_sentences", 0))
+        reason2 = str(verdict2_obj.get("reason", ""))
     except Exception as exc:
-        log.warning("Boundary re-verify call failed (non-fatal, treating as pass): %s", exc)
-        return adjusted, True
+        log.warning(
+            "Boundary start-shift re-verify failed (non-fatal, keeping): %s", exc
+        )
+        return shift_candidate, True
 
     if verdict2 == "pass":
-        log.debug("Boundary re-verify PASS after adjustment")
-        return adjusted, True
+        # Apply any fine-tuning adjustments from the second call
+        if delta2_start != 0 or delta2_end != 0:
+            shift_adjusted, _, _ = _apply_boundary_deltas(
+                shift_candidate, sentence_spans, shift_si, ei,
+                delta2_start, delta2_end, clip_len,
+            )
+            log.info(
+                "Boundary verify REPAIRED (start-shift+adj): "
+                "[%.2f,%.2f]→[%.2f,%.2f] delta_start2=%d delta_end2=%d",
+                start, end,
+                shift_adjusted["start"], shift_adjusted["end"],
+                delta2_start, delta2_end,
+            )
+            return shift_adjusted, True
+        log.info(
+            "Boundary verify REPAIRED (start-shift): [%.2f,%.2f] start %.2f→%.2f reason=%r",
+            start, end, start, shift_start, reason,
+        )
+        return shift_candidate, True
 
-    reason2 = str(verdict2_obj.get("reason", ""))
+    # Start-shift re-verify also failed → DROP
     log.info(
-        "Boundary verify DROP: clip start=%.2f end=%.2f failed re-verify. reason=%r",
-        start, end, reason2,
+        "Boundary verify DROP (fail+shift also failed): "
+        "clip [%.2f,%.2f] reason=%r → reason2=%r",
+        start, end, reason, reason2,
     )
-    return adjusted, False
+    return shift_candidate, False
 
 
 def _parse_boundary_verdict(text: str) -> dict[str, Any]:

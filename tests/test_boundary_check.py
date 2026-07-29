@@ -348,6 +348,309 @@ class TestVerifyBoundaries:
         adjusted, keep = bc_mod.verify_boundaries(c, spans, (5, 60))
         assert keep is True
 
+    def test_fail_with_adjust_then_pass_updated(self, monkeypatch):
+        """Under repair-first logic: fail+adj≠0 → REPAIR immediately (one call).
+
+        The second LLM call is never made — the adjustment is applied and the
+        clip is kept without re-verifying.  This is the core change from the old
+        double-verify design.
+        """
+        import producer.boundary_check as bc_mod
+        call_count = [0]
+
+        def fake_create_completion(client, model, max_tokens, messages):
+            call_count[0] += 1
+            if call_count[0] > 1:
+                raise AssertionError("Second LLM call must not happen for fail+adj≠0")
+            msg = MagicMock()
+            msg.content = [MagicMock(
+                type="text",
+                text='{"verdict":"fail","reason":"bad start","adjusted_start_sentences":1,"adjusted_end_sentences":0}',
+            )]
+            return msg
+
+        import core.llm as llm_mod
+        mock_client = MagicMock()
+        monkeypatch.setattr(bc_mod, "_get_boundary_client", lambda: (mock_client, "test-model"))
+        monkeypatch.setattr(llm_mod, "create_completion", fake_create_completion)
+        monkeypatch.setattr(llm_mod, "extract_text", lambda msg: msg.content[0].text)
+
+        spans = _spans(
+            ("So this is a bad start.", 0.0, 5.0),
+            ("BPC-157 heals tendons.", 5.0, 10.0),
+            ("Studies confirm this.", 10.0, 15.0),
+        )
+        c = _candidate(0.0, 15.0)
+        adjusted, keep = bc_mod.verify_boundaries(c, spans, (5, 60))
+        assert keep is True
+        assert adjusted["start"] >= 5.0   # delta_start=1 bumped start forward
+        assert call_count[0] == 1         # exactly one LLM call
+
+
+class TestVerifyBoundariesRepair:
+    """New tests for the repair-first (adjust-first, drop-last) logic."""
+
+    def _patch_client(
+        self,
+        monkeypatch,
+        first_verdict: str,
+        second_verdict: str | None = None,
+    ):
+        """Patch LLM client; optional second_verdict for the start-shift round."""
+        call_count = [0]
+
+        def fake_create_completion(client, model, max_tokens, messages):
+            call_count[0] += 1
+            text = (
+                first_verdict
+                if (second_verdict is None or call_count[0] == 1)
+                else second_verdict
+            )
+            msg = MagicMock()
+            msg.content = [MagicMock(type="text", text=text)]
+            return msg
+
+        import producer.boundary_check as bc_mod
+        import core.llm as llm_mod
+        mock_client = MagicMock()
+        monkeypatch.setattr(bc_mod, "_get_boundary_client", lambda: (mock_client, "test-model"))
+        monkeypatch.setattr(llm_mod, "create_completion", fake_create_completion)
+        monkeypatch.setattr(llm_mod, "extract_text", lambda msg: msg.content[0].text)
+        return call_count
+
+    # ── Repair via end trim ────────────────────────────────────────────────────
+
+    def test_fail_end_trim_adj_keeps_clip(self, monkeypatch):
+        """fail + adjusted_end_sentences=-1 → trim last sentence, keep clip.
+
+        This is the clip-80 / list-item-bleed pattern.  Under repair-first logic
+        the adjusted clip is kept without a second LLM call.
+        """
+        import producer.boundary_check as bc_mod
+        fail_adj = (
+            '{"verdict":"fail","reason":"last sentence starts new list item",'
+            '"adjusted_start_sentences":0,"adjusted_end_sentences":-1}'
+        )
+        call_count = self._patch_client(monkeypatch, fail_adj)
+
+        spans = _spans(
+            ("BPC-157 heals tendons.", 0.0, 10.0),
+            ("Studies confirm 80% improvement.", 10.0, 20.0),
+            ("Number 16, CAX. This is like Adderall.", 20.0, 30.0),
+        )
+        c = _candidate(0.0, 30.0)
+        adjusted, keep = bc_mod.verify_boundaries(c, spans, (10, 60))
+
+        assert keep is True
+        assert adjusted["end"] == 20.0    # last sentence trimmed
+        assert call_count[0] == 1         # exactly one LLM call — no re-verify
+
+    def test_fail_start_adj_keeps_clip(self, monkeypatch):
+        """fail + adjusted_start_sentences=+1 → skip bad opening sentence, keep."""
+        import producer.boundary_check as bc_mod
+        fail_adj = (
+            '{"verdict":"fail","reason":"starts with continuation opener",'
+            '"adjusted_start_sentences":1,"adjusted_end_sentences":0}'
+        )
+        call_count = self._patch_client(monkeypatch, fail_adj)
+
+        spans = _spans(
+            ("So anyway, here we are.", 0.0, 8.0),
+            ("BPC-157 is the topic.", 8.0, 18.0),
+            ("Studies confirm the effect.", 18.0, 28.0),
+        )
+        c = _candidate(0.0, 28.0)
+        adjusted, keep = bc_mod.verify_boundaries(c, spans, (10, 60))
+
+        assert keep is True
+        assert adjusted["start"] == 8.0   # first sentence skipped
+        assert call_count[0] == 1
+
+    def test_fail_end_trim_min_len_prevents_trim_still_keeps(self, monkeypatch):
+        """fail + adj_end=-1 but min_len prevents the trim → KEEP (one call).
+
+        _apply_boundary_deltas enforces min_len by re-extending the end, so the
+        adjusted candidate may end up the same as the original.  We still KEEP
+        because the verifier provided a non-zero adjustment (it tried to fix the
+        boundary).  The review critic downstream gates final quality.
+        """
+        import producer.boundary_check as bc_mod
+        fail_adj = (
+            '{"verdict":"fail","reason":"trailing list item",'
+            '"adjusted_start_sentences":0,"adjusted_end_sentences":-1}'
+        )
+        call_count = self._patch_client(monkeypatch, fail_adj)
+
+        # 2 sentences of 5s each; trimming last would give 5s < min 8s.
+        # _apply_boundary_deltas extends back to include the trailing sentence
+        # to satisfy min_len, so adjusted.end == 10.0 (unchanged).
+        spans = _spans(
+            ("Good content here.", 0.0, 5.0),
+            ("Moving on to the next.", 5.0, 10.0),
+        )
+        c = _candidate(0.0, 10.0)
+        adjusted, keep = bc_mod.verify_boundaries(c, spans, (8, 60))
+
+        assert keep is True                # KEEP even when trim can't fully apply
+        assert adjusted["end"] == 10.0     # min_len enforcement kept original end
+        assert call_count[0] == 1          # exactly one LLM call
+
+    def test_fail_both_adj_nonzero_single_call(self, monkeypatch):
+        """fail + adj_start=+1, adj_end=-1 → both applied, single call, keep."""
+        import producer.boundary_check as bc_mod
+        fail_adj = (
+            '{"verdict":"fail","reason":"bad start and trailing bleed",'
+            '"adjusted_start_sentences":1,"adjusted_end_sentences":-1}'
+        )
+        call_count = self._patch_client(monkeypatch, fail_adj)
+
+        # 5 sentences of 10s each = 50s clip; trim 1 from each end → 30s
+        spans = _spans(
+            ("So we continue from before.", 0.0, 10.0),
+            ("The real point is here.", 10.0, 20.0),
+            ("More detail about this.", 20.0, 30.0),
+            ("That wraps up the idea.", 30.0, 40.0),
+            ("And just like that, next topic.", 40.0, 50.0),
+        )
+        c = _candidate(0.0, 50.0)
+        adjusted, keep = bc_mod.verify_boundaries(c, spans, (10, 60))
+
+        assert keep is True
+        assert adjusted["start"] == 10.0  # first sentence skipped
+        assert adjusted["end"] == 40.0    # last sentence trimmed
+        assert call_count[0] == 1
+
+    # ── Start-shift repair (fail + adj=0) ─────────────────────────────────────
+
+    def test_fail_zero_adj_si_zero_drops_immediately(self, monkeypatch):
+        """fail + adj=0 + si=0 → no earlier sentence; DROP with one call."""
+        import producer.boundary_check as bc_mod
+        fail_zero = (
+            '{"verdict":"fail","reason":"hook/body mismatch",'
+            '"adjusted_start_sentences":0,"adjusted_end_sentences":0}'
+        )
+        call_count = self._patch_client(monkeypatch, fail_zero)
+
+        spans = _spans(
+            ("The clip starts at the very beginning.", 0.0, 10.0),
+            ("Body content about different topic.", 10.0, 25.0),
+        )
+        c = _candidate(0.0, 25.0)  # si will be 0 (first span)
+        adjusted, keep = bc_mod.verify_boundaries(c, spans, (8, 60))
+
+        assert keep is False
+        assert call_count[0] == 1   # only first call; no start-shift (si=0)
+
+    def test_fail_zero_adj_start_shift_pass_keeps(self, monkeypatch):
+        """fail + adj=0 + si>0 → start-shift backward, second call passes → KEEP."""
+        import producer.boundary_check as bc_mod
+        fail_zero = (
+            '{"verdict":"fail","reason":"starts mid-sentence",'
+            '"adjusted_start_sentences":0,"adjusted_end_sentences":0}'
+        )
+        pass_verdict = (
+            '{"verdict":"pass","reason":"now starts cleanly",'
+            '"adjusted_start_sentences":0,"adjusted_end_sentences":0}'
+        )
+        call_count = self._patch_client(monkeypatch, fail_zero, pass_verdict)
+
+        spans = _spans(
+            ("Here is where the idea actually begins.", 0.0, 8.0),    # si-1 after shift
+            ("And this is the mid-point of the thought.", 8.0, 18.0), # si (original start)
+            ("The conclusion lands here.", 18.0, 28.0),               # ei
+        )
+        # Candidate starts at 8.0 → si=1, so there IS an earlier sentence (si-1=0)
+        c = _candidate(8.0, 28.0)
+        adjusted, keep = bc_mod.verify_boundaries(c, spans, (8, 60))
+
+        assert keep is True
+        assert adjusted["start"] == 0.0  # shifted back to span[0]
+        assert call_count[0] == 2        # first verify + one start-shift verify
+
+    def test_fail_zero_adj_start_shift_also_fails_drops(self, monkeypatch):
+        """fail + adj=0 + si>0 → start-shift, second call also fails → DROP."""
+        import producer.boundary_check as bc_mod
+        fail_zero = (
+            '{"verdict":"fail","reason":"whole span is wrong",'
+            '"adjusted_start_sentences":0,"adjusted_end_sentences":0}'
+        )
+        call_count = self._patch_client(monkeypatch, fail_zero, fail_zero)
+
+        spans = _spans(
+            ("Some prior context sentence.", 0.0, 8.0),
+            ("Clip starts here — wrong topic entirely.", 8.0, 20.0),
+            ("More wrong-topic content.", 20.0, 32.0),
+        )
+        c = _candidate(8.0, 32.0)  # si=1, shift to si=0
+        adjusted, keep = bc_mod.verify_boundaries(c, spans, (8, 60))
+
+        assert keep is False
+        assert call_count[0] == 2   # first verify + one start-shift verify
+
+    def test_fail_zero_adj_start_shift_pass_with_end_adj(self, monkeypatch):
+        """fail + adj=0 + si>0 → shift, second call pass + adj_end=-1 → KEEP with trim."""
+        import producer.boundary_check as bc_mod
+        fail_zero = (
+            '{"verdict":"fail","reason":"starts mid-thought",'
+            '"adjusted_start_sentences":0,"adjusted_end_sentences":0}'
+        )
+        # Second call: pass but suggests trimming last sentence
+        pass_with_adj = (
+            '{"verdict":"pass","reason":"good start, trim tail",'
+            '"adjusted_start_sentences":0,"adjusted_end_sentences":-1}'
+        )
+        call_count = self._patch_client(monkeypatch, fail_zero, pass_with_adj)
+
+        spans = _spans(
+            ("Real opening of the idea.", 0.0, 10.0),
+            ("Continuation of the idea.", 10.0, 20.0),
+            ("The payoff lands here.", 20.0, 30.0),
+            ("Trailing list item: moving on.", 30.0, 40.0),
+        )
+        # Candidate starts at 10.0 → si=1; shift to si=0
+        c = _candidate(10.0, 40.0)
+        adjusted, keep = bc_mod.verify_boundaries(c, spans, (8, 60))
+
+        assert keep is True
+        assert adjusted["start"] == 0.0   # shifted back to span[0]
+        assert adjusted["end"] == 30.0    # trailing sentence trimmed by second call adj
+        assert call_count[0] == 2
+
+    def test_start_shift_transport_error_keeps_shifted(self, monkeypatch):
+        """fail + adj=0 + si>0 → start-shift → second call throws → keep (non-fatal)."""
+        import producer.boundary_check as bc_mod
+        import core.llm as llm_mod
+
+        call_count = [0]
+
+        def fake_create_completion(client, model, max_tokens, messages):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                msg = MagicMock()
+                msg.content = [MagicMock(
+                    type="text",
+                    text='{"verdict":"fail","reason":"start mid-sentence","adjusted_start_sentences":0,"adjusted_end_sentences":0}',
+                )]
+                return msg
+            raise ConnectionError("network timeout on second call")
+
+        mock_client = MagicMock()
+        monkeypatch.setattr(bc_mod, "_get_boundary_client", lambda: (mock_client, "test-model"))
+        monkeypatch.setattr(llm_mod, "create_completion", fake_create_completion)
+        monkeypatch.setattr(llm_mod, "extract_text", lambda msg: msg.content[0].text)
+
+        spans = _spans(
+            ("Earlier sentence that is the real start.", 0.0, 10.0),
+            ("This is where the ranker started.", 10.0, 22.0),
+            ("More content here.", 22.0, 32.0),
+        )
+        c = _candidate(10.0, 32.0)  # si=1; shift possible
+        adjusted, keep = bc_mod.verify_boundaries(c, spans, (8, 60))
+
+        # Transport error on second call → non-fatal → keep
+        assert keep is True
+        assert call_count[0] == 2
+
 
 # ---------------------------------------------------------------------------
 # Sentence-index conversion tests (integration with _validate_moments)
