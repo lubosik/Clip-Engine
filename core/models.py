@@ -423,3 +423,57 @@ class MemeProfile(Base):
         UniqueConstraint("campaign", "version", name="uq_meme_profiles_campaign_version"),
         Index("ix_meme_profiles_campaign", "campaign"),
     )
+
+
+# ---------------------------------------------------------------------------
+# pipeline_events — live progress event log (migration 008)
+# ---------------------------------------------------------------------------
+
+class PipelineEvent(Base):
+    """One row per emitted pipeline progress event (PROGRESS_EVENTS_CONTRACTS.md §1).
+
+    id is a global BIGSERIAL — used as the SSE Last-Event-ID so EventSource
+    can resume from the exact event it last saw.
+
+    source_id FKs to sources.source_id ON DELETE CASCADE so that clearing a
+    source also removes its event history without an extra query.
+
+    Emitter: producer/progress_events.emit_event().  Callers commit after
+    emit_event(); the emitter itself never commits and never raises.
+    """
+
+    __tablename__ = "pipeline_events"
+
+    # BigInteger on PostgreSQL (global monotonic id for SSE Last-Event-ID);
+    # falls back to plain Integer on SQLite (tests) since SQLite only auto-increments
+    # columns declared as "INTEGER", not "BIGINT".
+    _bigint_pk = BigInteger().with_variant(Integer(), "sqlite")
+    id: Mapped[int] = mapped_column(_bigint_pk, primary_key=True, autoincrement=True)
+    source_id: Mapped[str] = mapped_column(
+        String(512),
+        ForeignKey("sources.source_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    clip_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Stage vocabulary per §2:
+    # queued | transcribing | downloading | identifying | identified |
+    # pre_verify | rendering | reviewing | correction | judging |
+    # ready | didnt_pass | complete  + any-stage status:failed
+    stage: Mapped[str] = mapped_column(String(24), nullable=False)
+    # running | done | failed | corrected
+    status: Mapped[str] = mapped_column(String(12), nullable=False)
+    progress_n: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    progress_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Human-readable line — shown verbatim in the live caption
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Failure/correction reason
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        # Composite index supports SSE replay (WHERE source_id=? AND id > ?)
+        # and efficient per-source tailing.
+        Index("ix_pipeline_events_source_id_id", "source_id", "id"),
+    )

@@ -5,7 +5,7 @@ PYTHON  := .venv/bin/python
 PYTEST  := .venv/bin/pytest
 MODAL   := .venv/bin/modal
 
-.PHONY: healthcheck smoke demo test deploy-modal upload-hero eval-segmentation simulate-pipeline
+.PHONY: healthcheck smoke demo test deploy-modal upload-hero eval-segmentation simulate-pipeline demo-progress
 
 # ── System readiness check ──────────────────────────────────────────────────
 # Verifies Postgres, R2 (put/get/delete), Apify, Postiz, and Modal (token +
@@ -56,3 +56,11 @@ eval-segmentation:
 # fails; exit 0 only at 100%.
 simulate-pipeline:
 	$(PYTHON) scripts/simulate_pipeline.py
+
+# ── Demo pipeline progress replay ───────────────────────────────────────────
+# Replays tests/fixtures/progress/demo_events.json into a local SQLite DB at
+# realistic pacing.  Boot uvicorn against the same DB (instructions printed at
+# start) and watch the live SSE progress UI with zero spend.
+# Pass FAST=1 for instant replay: make demo-progress FAST=1
+demo-progress:
+	$(PYTHON) scripts/demo_progress.py $(if $(FAST),--fast,)

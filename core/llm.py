@@ -26,6 +26,19 @@ from core.fewshot import REAL_BOUNDARY_PAIRS, REFERENCE_EXEMPLAR
 
 log = logging.getLogger(__name__)
 
+
+class RankingUnavailable(RuntimeError):
+    """Raised by rank_moments when the LLM response cannot be parsed after retry.
+
+    Distinct from returning [] (genuinely empty but valid JSON): this exception
+    means the model output was malformed/unparseable. Callers should treat this
+    as a transient failure and leave the source retryable (status UNTOUCHED) —
+    mirroring the TranscriptFetchError semantics.
+
+    Genuinely-empty-but-valid JSON ({"topics": [], "clips": []}) still returns [].
+    """
+
+
 # ~12s LLM-prompt chunks: the discovery actor emits 2-4s transcript fragments;
 # merging them strips thousands of redundant timestamp markers per long podcast
 # with no word loss. Boundary snapping still uses the full-resolution transcript.
@@ -320,7 +333,8 @@ CAMPAIGN RANKING RULES:
 {rules.strip()}{stance_section}
 
 CLIP LENGTH CONSTRAINTS: minimum {clip_len[0]}s, maximum {clip_len[1]}s
-MAXIMUM CLIPS TO RETURN: {max_clips}{comment_section}{pref_section}
+MAXIMUM CLIPS TO RETURN: {max_clips}
+TOPIC SEGMENTS: list major segments only, at most ~12 (coarse groupings, not every sentence){comment_section}{pref_section}
 
 SENTENCE-BOUNDARY RULE (mandatory): Every clip must start at the FIRST word of a \
 sentence and end at the LAST word of a sentence — use the sentence INDEX numbers \
@@ -395,7 +409,8 @@ CAMPAIGN RANKING RULES:
 {rules.strip()}{stance_section}
 
 CLIP LENGTH CONSTRAINTS: minimum {clip_len[0]}s, maximum {clip_len[1]}s
-MAXIMUM CLIPS TO RETURN: {max_clips}{comment_section}{pref_section}
+MAXIMUM CLIPS TO RETURN: {max_clips}
+TOPIC SEGMENTS: list major segments only, at most ~12 (coarse groupings, not every sentence){comment_section}{pref_section}
 
 SENTENCE-BOUNDARY RULE (mandatory): Choose start at the FIRST word of a sentence \
 and end at the LAST word of a sentence — the clip must be a complete, coherent \
@@ -542,9 +557,20 @@ def rank_moments(
         stance=stance,
     )
 
-    def _call() -> str:
+    def _call(extra_prefix: str = "") -> str:
+        messages: list[dict] = [{"role": "user", "content": prompt}]
+        if extra_prefix:
+            # Prepend the retry instruction as a separate user turn to emphasise
+            # that we need clean JSON — no prose, no code fences.
+            messages = [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": ""},
+                {"role": "user", "content": extra_prefix},
+            ]
+            # Simpler: just prepend to the original prompt in the single message.
+            messages = [{"role": "user", "content": extra_prefix + "\n\n" + prompt}]
         message = create_completion(
-            client, model, 4096, [{"role": "user", "content": prompt}]
+            client, model, 8000, messages
         )
         return extract_text(message)
 
@@ -554,20 +580,54 @@ def rank_moments(
 
     moments_raw, topics_raw = _parse_ranking_response(response_text)
 
+    # Distinguish between unparseable response and genuinely empty valid JSON.
+    # _parse_ranking_response returns ([], []) for BOTH cases, so we need to
+    # inspect the raw text: if we can find a JSON object with clips key that is
+    # explicitly empty, that is a valid empty result — not a parse failure.
+    def _is_valid_empty_response(text: str) -> bool:
+        """Return True if the response is valid JSON with an explicit empty clips list."""
+        import re as _re
+        obj_match = _re.search(r"\{.*\}", text, _re.DOTALL)
+        if not obj_match:
+            return False
+        try:
+            import json as _json
+            obj = _json.loads(obj_match.group())
+            if isinstance(obj, dict) and "clips" in obj:
+                return isinstance(obj["clips"], list)
+        except Exception:
+            pass
+        return False
+
     if not moments_raw and not topics_raw:
+        # Check if the first response was a valid empty result
+        if _is_valid_empty_response(response_text):
+            log.info("LLM returned a valid empty clips list on first attempt")
+            return []
+
         log.warning(
             "LLM response did not contain parseable JSON; retrying once",
             extra={"response_preview": response_text[:300]},
         )
-        response_text = _call()
+        response_text = _call(
+            extra_prefix="Return ONLY the JSON object, no commentary."
+        )
         moments_raw, topics_raw = _parse_ranking_response(response_text)
 
     if not moments_raw:
+        # If the retry also produced empty, distinguish valid-empty from parse-error.
+        if _is_valid_empty_response(response_text):
+            log.info("LLM returned a valid empty clips list after retry")
+            return []
+
         log.error(
-            "LLM returned no clips after retry; returning empty",
+            "LLM returned unparseable response after retry; raising RankingUnavailable",
             extra={"response_preview": response_text[:300]},
         )
-        return []
+        raise RankingUnavailable(
+            f"LLM ranking response could not be parsed after retry. "
+            f"Preview: {response_text[:200]!r}"
+        )
 
     topic_segments = _validate_topic_segments(topics_raw)
     if topic_segments:

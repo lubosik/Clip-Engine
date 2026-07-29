@@ -1,35 +1,65 @@
 /**
- * sources.js — Sources view.
+ * sources.js — Sources view (revamp v3, 2026-07-29).
  *
- * Two sections (top to bottom):
- *   1. "In progress" — live via EventSource('/api/sources/stream'), falls back
- *      to 5-second polling of GET /api/sources?in_progress=1 on SSE error.
- *   2. "History" — all sources (searchable), with exhaustion chips and clip
- *      counts added to each row.
+ * In-progress panel (§4 of PROGRESS_EVENTS_CONTRACTS.md):
+ *   - Discovers in-progress sources via GET /api/sources?in_progress=1.
+ *   - Opens one EventSource per source at GET /api/sources/{id}/events.
+ *     Native retry + Last-Event-ID header handle reconnection.
+ *   - Cap: 3 concurrent EventSource connections; further sources poll the
+ *     state endpoint every 4 s instead.
+ *   - Initial render from GET /api/sources/{id}/events/state snapshot.
+ *   - After 3 consecutive EventSource errors: fall back to polling state
+ *     endpoint every 4 s (same rendering path as the cap-overflow case).
+ *   - Stage-weighted progress bar (§4 percent map); 500 ms ease-out transition;
+ *     no transition under prefers-reduced-motion.
+ *   - Per-clip chip rail appears when progress_total is known (identified stage).
+ *   - Live caption line = latest event.detail verbatim.
+ *   - Stalled indicator: no event received for > 90 s while a non-terminal
+ *     stage is active.
+ *   - Terminal settle: stage=complete → mini history row with "X ready /
+ *     Y didn't pass" linking to queue sections.
  *
- * SSE lifecycle:
- *   - Opened when the view initialises.
- *   - Diffs the JSON payload by source id — skips re-render if unchanged.
- *   - On 'error': closes, starts 5-second polling fallback.
- *   - MutationObserver on the container closes ES/poll when .active is removed
- *     (user navigates away), and re-opens when .active is added (user returns).
- *   - On re-init (after logout/login): previous handles are cleaned up first.
+ * Mock mode (localStorage.mock === "1"):
+ *   - Reads localStorage.mockScene (default "midRendering") to pick a fixture
+ *     from fixtures.inProgressScenes.
+ *   - Renders directly from fixtures; no EventSource opened.
+ *
+ * History section is unchanged from v2.
  *
  * Exported API:
  *   initSources(container, ctx)
  */
 
-// ── Module-level SSE lifecycle handles ────────────────────────────────────────
+// ── Module-level lifecycle handles ────────────────────────────────────────────
 
-let _esHandle   = null;   // EventSource or null
-let _pollHandle = null;   // setInterval id or null
-let _esObserver = null;   // MutationObserver watching the container .active class
-let _ctx        = null;   // shared context — set in initSources
+let _ctx        = null;   // shared context from app.js
+let _esObserver = null;   // MutationObserver for view active/inactive
+let _listTimer  = null;   // setInterval: re-discover in-progress sources
 
-function _cleanupLive() {
-  if (_esHandle)   { _esHandle.close();         _esHandle   = null; }
-  if (_pollHandle) { clearInterval(_pollHandle); _pollHandle = null; }
-}
+// Per-source live state: Map<sourceId, stateSnapshot>
+// State snapshot shape mirrors GET /api/sources/{id}/events/state response.
+const _sourceStates = new Map();
+
+// Per-source transport: Map<sourceId, { esHandle, pollHandle, errorCount }>
+const _sourceConns  = new Map();
+
+// Rerender handle — debounced to batch multiple rapid events
+let _renderPending = false;
+
+// Container DOM reference (set in initSources)
+let _container = null;
+
+// Max concurrent SSE connections
+const MAX_SSE = 3;
+
+// Stall threshold: 90 s since last event/heartbeat
+const STALL_MS = 90_000;
+
+// Poll interval for fallback (overflow sources + SSE-error fallback)
+const POLL_MS_SOURCE = 4_000;
+
+// Discovery re-poll: check for newly added in-progress sources every 15 s
+const DISCOVER_MS = 15_000;
 
 // ── Platform SVG glyphs ───────────────────────────────────────────────────────
 
@@ -47,8 +77,17 @@ const PLATFORM_ICON = {
   </svg>`,
 };
 
+// Small correction glyph — used on chips that survived at least one correction
+const CORRECTION_GLYPH = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none"
+  stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+  aria-label="corrected" class="chip-correction-glyph">
+  <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
+  <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+</svg>`;
+
 function _platformIcon(platform) {
-  return PLATFORM_ICON[platform] || `<span style="font-size:10px;text-transform:uppercase;opacity:.5">${_esc(platform || '?')}</span>`;
+  return PLATFORM_ICON[platform] ||
+    `<span style="font-size:10px;text-transform:uppercase;opacity:.5">${_esc(platform || '?')}</span>`;
 }
 
 function _esc(str) {
@@ -66,208 +105,637 @@ function _fmtDate(isoStr) {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-// ── Stage label + percent (contract §7) ──────────────────────────────────────
+// ── Stage helpers (contract §4) ───────────────────────────────────────────────
 
-function _stageLabel(src) {
-  const { stage, clips_rendered = 0, clips_identified, clips_approved = 0 } = src;
+/**
+ * Stage-weighted percent map per §4:
+ *   queued 2, transcribing 10, downloading 25, identifying 35, identified 40,
+ *   then 40→95 proportional to terminal clips / total, complete 100.
+ *
+ * @param {{ stage: string, progress_total: number|null, clips_detail: Array }} state
+ * @returns {number} 0–100
+ */
+function _barPercent(state) {
+  const { stage, progress_total, clips_detail } = state;
+  if (!stage || stage === 'failed') return 0;
+  if (stage === 'complete') return 100;
+
+  const FIXED = {
+    queued: 2,
+    transcribing: 10,
+    downloading: 25,
+    identifying: 35,
+    identified: 40,
+  };
+  if (stage in FIXED) return FIXED[stage];
+
+  // Post-identified stages: 40→95 based on terminal clips
+  const total = progress_total || 0;
+  if (total > 0) {
+    const detail  = Array.isArray(clips_detail) ? clips_detail : [];
+    const terminal = detail.filter(
+      (c) => c.stage === 'ready' || c.stage === 'didnt_pass'
+    ).length;
+    return Math.min(95, 40 + Math.round(55 * terminal / total));
+  }
+  return 40;
+}
+
+/** Human-readable stage label for the overall stage line. */
+function _stageLabel(state) {
+  const { stage, progress_n, progress_total } = state;
   switch (stage) {
     case 'queued':       return 'Queued';
-    case 'transcribing': return 'Transcribing';
-    case 'identifying':  return 'Identifying clips';
+    case 'transcribing': return 'Transcribing…';
+    case 'downloading':  return 'Downloading…';
+    case 'identifying':  return 'Identifying clips…';
+    case 'identified':   return progress_total != null
+      ? `Found ${progress_total} clip${progress_total !== 1 ? 's' : ''}`
+      : 'Clips identified';
+    case 'pre_verify':   return 'Verifying clip';
     case 'rendering': {
-      const n = clips_rendered || 0;
-      const N = clips_identified != null ? clips_identified : '?';
-      return `Rendering ${n}/${N}`;
+      const n = progress_n || '?';
+      const N = progress_total || '?';
+      return `Rendering ${n} / ${N}`;
     }
-    case 'correcting':   return 'Correcting';
-    case 'reviewing': {
-      const n = clips_approved || 0;
-      const N = clips_rendered || 0;
-      return `In review ${n}/${N} approved`;
-    }
-    case 'complete': return 'Complete';
-    case 'failed':   return 'Failed';
-    default:         return stage || '—';
+    case 'reviewing':    return 'Reviewing clip';
+    case 'correction':   return 'Correcting clip';
+    case 'correcting':   return 'Correcting clip'; // source DB stage during re-renders
+    case 'judging':      return 'Judging clip';
+    case 'ready':        return 'Ready';
+    case 'didnt_pass':   return "Didn't pass";
+    case 'complete':     return 'Complete';
+    case 'failed':       return 'Failed';
+    default:             return stage || '—';
   }
 }
 
-function _stagePercent(src) {
-  const { stage, clips_rendered = 0, clips_identified, clips_approved = 0, clips_rejected = 0 } = src;
-  switch (stage) {
-    case 'queued':       return 5;
-    case 'transcribing': return 20;
-    case 'identifying':  return 35;
-    case 'rendering': {
-      if (!clips_identified || clips_identified === 0) return 35;
-      return Math.min(90, 35 + Math.round(55 * ((clips_rendered || 0) / clips_identified)));
-    }
-    case 'correcting':   return 80;
-    case 'reviewing': {
-      const decided = (clips_approved || 0) + (clips_rejected || 0);
-      const rendered = clips_rendered || 0;
-      if (rendered === 0) return 90;
-      return Math.min(100, 90 + Math.round(10 * (decided / rendered)));
-    }
-    case 'complete': return 100;
-    default:         return 0;  // failed or unknown — no bar
-  }
+/** Format seconds into human-readable elapsed string. */
+function _fmtElapsed(seconds) {
+  if (seconds == null || seconds < 0) return null;
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  if (m < 60) return rem > 0 ? `${m}m ${rem}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
 }
 
-// ── Per-clip detail helpers (clips_detail from SSE payload §6) ────────────────
+/** Returns true if the source has not received an event for > STALL_MS. */
+function _isStalled(state) {
+  if (!state.latest_ts) return false;
+  const terminal = ['complete', 'failed', 'ready', 'didnt_pass'];
+  if (terminal.includes(state.stage)) return false;
+  const tsMs = typeof state.latest_ts === 'number'
+    ? state.latest_ts
+    : new Date(state.latest_ts).getTime();
+  return Date.now() - tsMs > STALL_MS;
+}
+
+// ── Clip chip state derivation ────────────────────────────────────────────────
 
 /**
- * Derive a display state from a clips_detail item.
- * Fields: {id, gate_status, status, correction_attempts, last_failure_reasons, judge}
+ * Derive a chip micro-state and render options from a clips_detail entry.
  *
- * @param {{ judge: string|null, correction_attempts: number, gate_status: string }} clip
- * @returns {{ label: string, cls: string }}
+ * clips_detail item shape (from state endpoint / SSE events):
+ *   { clip_id, stage, status, correction_attempts, reason }
+ *
+ * @param {{ stage: string, status: string, correction_attempts: number, reason: string|null }} clip
+ * @returns {{ label: string, cls: string, reason: string|null, showGlyph: boolean, revealable: boolean }}
  */
-function _clipDetailState(clip) {
-  if (clip.judge === 'approved') {
-    return { label: 'ready', cls: 'chip-accent' };
+function _chipState(clip) {
+  const { stage, status, correction_attempts, reason } = clip;
+  const wasCorrected = (correction_attempts || 0) > 0;
+
+  if (stage === 'ready') {
+    return { label: 'ready', cls: 'chip-accent', reason: null, showGlyph: wasCorrected, revealable: false };
   }
-  if (clip.judge === 'escalate_to_human' || clip.judge === 'rejected') {
-    return { label: "didn't pass", cls: 'chip-amber' };
+  if (stage === 'didnt_pass') {
+    return { label: "didn't pass", cls: 'chip-amber', reason, showGlyph: wasCorrected, revealable: !!reason };
   }
-  // judge is null — clip is still in-flight
-  if (clip.correction_attempts > 0) {
-    return { label: `correcting (fix ${clip.correction_attempts}/2)`, cls: 'chip-amber' };
+  if (stage === 'correction') {
+    const n = correction_attempts || 1;
+    return { label: `correcting (fix ${n}/2)`, cls: 'chip-amber chip-correcting', reason, showGlyph: false, revealable: !!reason };
   }
-  if (clip.gate_status === 'pending') {
-    return { label: 'rendering', cls: '' };
+  if (stage === 'reviewing') {
+    return { label: 'reviewing', cls: 'chip-reviewing', reason: null, showGlyph: false, revealable: false };
   }
-  return { label: 'reviewing', cls: '' };
+  if (stage === 'rendering') {
+    return { label: 'rendering', cls: 'chip-rendering', reason: null, showGlyph: false, revealable: false };
+  }
+  if (stage === 'pre_verify' && status === 'failed') {
+    return { label: 'pre-verify failed', cls: 'chip-amber', reason, showGlyph: false, revealable: !!reason };
+  }
+  // Default: waiting (clip known but not yet started)
+  return { label: 'waiting', cls: 'chip-waiting', reason: null, showGlyph: false, revealable: false };
 }
 
 /**
- * Build the aggregate summary line from clips_detail counts.
+ * Build HTML for the per-clip chip rail.
+ * Appears once progress_total is known (identified stage or later).
  *
- * @param {Array<{ judge: string|null, correction_attempts: number, gate_status: string }>} clips
+ * @param {Array}        clipsDetail  clips_detail array from state snapshot
+ * @param {number|null}  total        progress_total — total expected clips
  * @returns {string}
  */
-function _clipsDetailSummary(clips) {
-  const N = clips.length;
-  const ready      = clips.filter((c) => c.judge === 'approved').length;
-  const correcting = clips.filter((c) => !c.judge && c.correction_attempts > 0).length;
-  const rendering  = clips.filter((c) => !c.judge && c.correction_attempts === 0 && c.gate_status === 'pending').length;
+function _buildChipRail(clipsDetail, total) {
+  if (!total) return '';
 
-  const parts = [`found ${N} clip${N !== 1 ? 's' : ''}`];
-  if (rendering  > 0) parts.push(`rendering (${rendering}/${N})`);
-  if (correcting > 0) parts.push(`correcting (${correcting})`);
-  if (ready      > 0) parts.push(`ready (${ready}/${N})`);
-  return parts.join(' · ');
-}
+  const detail = Array.isArray(clipsDetail) ? clipsDetail : [];
+  const count  = Math.max(detail.length, total);
 
-/**
- * Build HTML for the clips_detail section inside an in-progress source card.
- *
- * @param {Array} clipsDetail
- * @returns {string}
- */
-function _buildClipsDetailHtml(clipsDetail) {
-  if (!Array.isArray(clipsDetail) || clipsDetail.length === 0) return '';
+  const chips = [];
+  for (let i = 0; i < count; i++) {
+    const clip = detail[i] || null;
+    const idx  = i + 1;  // 1-based chip number
 
-  const aggregate = _clipsDetailSummary(clipsDetail);
+    if (!clip) {
+      // Clip is known (total set) but no event yet — show waiting chip
+      chips.push(`<span class="chip chip-waiting chip-clip" aria-label="Clip ${idx}: waiting">${idx}</span>`);
+      continue;
+    }
 
-  const rows = clipsDetail.map((clip) => {
-    const { label, cls } = _clipDetailState(clip);
-    const hasReasons = Array.isArray(clip.last_failure_reasons) && clip.last_failure_reasons.length > 0;
+    const { label, cls, reason, showGlyph, revealable } = _chipState(clip);
+    const glyphHtml = showGlyph ? CORRECTION_GLYPH : '';
+    const ariaLabel = `Clip ${idx}: ${label}`;
 
-    const reasonsHtml = hasReasons
-      ? clip.last_failure_reasons.map((r) => `<p class="clip-detail-reason">${_esc(r)}</p>`).join('')
-      : '';
+    if (revealable && reason) {
+      // Amber chip: tap-to-reveal reason
+      chips.push(`
+        <details class="chip-reveal-wrap">
+          <summary class="chip ${cls} chip-clip chip-revealable" aria-label="${_esc(ariaLabel)}">
+            ${idx}${glyphHtml}
+          </summary>
+          <div class="chip-reveal-reason">${_esc(reason)}</div>
+        </details>`);
+    } else {
+      chips.push(
+        `<span class="chip ${cls} chip-clip" aria-label="${_esc(ariaLabel)}">${idx}${glyphHtml}</span>`
+      );
+    }
+  }
 
-    return `
-      <div class="clip-detail-row">
-        <span class="chip ${cls} clip-detail-chip">${_esc(label)}</span>
-        ${hasReasons ? `
-          <details class="clip-detail-reasons-wrap">
-            <summary class="clip-detail-reasons-toggle">Why?</summary>
-            <div class="clip-detail-reasons-body">${reasonsHtml}</div>
-          </details>` : ''}
-      </div>`;
-  }).join('');
-
-  return `
-    <div class="source-clips-detail">
-      <div class="source-clips-aggregate">${_esc(aggregate)}</div>
-      ${rows}
-    </div>`;
+  return `<div class="source-chip-rail" role="list" aria-label="Clip status rail">${chips.join('')}</div>`;
 }
 
 // ── In-progress card builder ──────────────────────────────────────────────────
 
-function _buildProgressCard(src) {
-  const isFailed = src.stage === 'failed';
-  const pct      = _stagePercent(src);
-  const stageText = _stageLabel(src);
+/**
+ * Build HTML for one in-progress source card from a state snapshot.
+ * Handles every stage including complete (terminal) and failed.
+ *
+ * @param {object} state  State snapshot (mirrors state endpoint response)
+ * @returns {string}
+ */
+function _buildProgressCard(state) {
+  const {
+    source_id, stage, title, url, platform, author_handle, campaign,
+    thumbnail_url, stage_error, clips_detail, progress_total,
+    latest_detail, stage_elapsed,
+  } = state;
 
-  const thumbHtml = src.thumbnail_url
-    ? `<img class="source-thumb" src="${_esc(src.thumbnail_url)}" alt="" loading="lazy"
-          onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-       <div class="source-thumb-fallback" style="display:none">${_platformIcon(src.platform)}</div>`
-    : `<div class="source-thumb-fallback">${_platformIcon(src.platform)}</div>`;
+  const isFailed   = stage === 'failed';
+  const isComplete = stage === 'complete';
+  const pct        = _barPercent(state);
+  const stageText  = _stageLabel(state);
+  const stalled    = _isStalled(state);
 
-  // Progress bar — light-stream motif; omitted for failed
-  const barHtml = !isFailed ? `
-    <div class="source-stage-bar-track"
-         role="progressbar"
-         aria-valuenow="${pct}"
-         aria-valuemin="0"
-         aria-valuemax="100"
-         aria-label="${_esc(stageText)} — ${pct}%">
-      <div class="source-stage-bar-fill" style="width:${pct}%">
-        <div class="source-stage-bar-streak" aria-hidden="true"></div>
-      </div>
-    </div>` : '';
+  // ── Thumbnail ───────────────────────────────────────────────────────────────
+  const thumbHtml = thumbnail_url
+    ? `<img class="source-thumb" src="${_esc(thumbnail_url)}" alt="" loading="lazy"
+           onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+       <div class="source-thumb-fallback" style="display:none">${_platformIcon(platform)}</div>`
+    : `<div class="source-thumb-fallback">${_platformIcon(platform)}</div>`;
 
-  // "Identified N clips" note — shown once clips_identified is known
-  const identifiedHtml = (!isFailed && src.clips_identified != null)
-    ? `<div class="source-identified-note">Identified ${src.clips_identified} clip${src.clips_identified !== 1 ? 's' : ''} from this video</div>`
+  // ── Chips row ───────────────────────────────────────────────────────────────
+  const stageChipCls = isFailed ? 'chip-amber' : isComplete ? 'chip-accent' : '';
+  const chipsRow = `
+    <div class="chips-row" style="margin-bottom:4px">
+      <span class="chip">${_platformIcon(platform)} ${_esc(platform || '—')}</span>
+      ${author_handle ? `<span class="chip">@${_esc(author_handle)}</span>` : ''}
+      <span class="chip">${_esc(campaign)}</span>
+      <span class="chip ${stageChipCls}">${_esc(stageText)}</span>
+    </div>`;
+
+  // ── Progress bar (omitted for failed) ──────────────────────────────────────
+  let barHtml = '';
+  if (!isFailed && !isComplete) {
+    barHtml = `
+      <div class="source-stage-bar-track"
+           role="progressbar"
+           aria-valuenow="${pct}"
+           aria-valuemin="0"
+           aria-valuemax="100"
+           aria-label="${_esc(stageText)} — ${pct}%">
+        <div class="source-stage-bar-fill" style="width:${pct}%">
+          <div class="source-stage-bar-streak" aria-hidden="true"></div>
+        </div>
+      </div>`;
+  }
+
+  // ── Elapsed + stalled ───────────────────────────────────────────────────────
+  let elapsedHtml = '';
+  const elapsedSecs = stage_elapsed?.[stage];
+  const elapsedStr  = _fmtElapsed(elapsedSecs);
+  if (elapsedStr && !isComplete) {
+    const stalledBadge = stalled
+      ? `<span class="source-stalled-badge" aria-label="Source may be stalled">stalled?</span>`
+      : '';
+    elapsedHtml = `
+      <div class="source-stage-elapsed${stalled ? ' source-stage-elapsed--stalled' : ''}">
+        ${_esc(stageText)} · ${_esc(elapsedStr)}${stalledBadge}
+      </div>`;
+  }
+
+  // ── Live caption line ───────────────────────────────────────────────────────
+  const captionHtml = latest_detail && !isComplete && !isFailed
+    ? `<div class="source-caption-line">${_esc(latest_detail)}</div>`
     : '';
 
-  // Error block for failed sources — truncate at 200 chars, expandable via <details>
+  // ── Chip rail (appears once clips are identified) ───────────────────────────
+  const chipRailHtml = (!isFailed && !isComplete && progress_total != null)
+    ? _buildChipRail(clips_detail, progress_total)
+    : '';
+
+  // ── Terminal summary (complete) ─────────────────────────────────────────────
+  let terminalHtml = '';
+  if (isComplete) {
+    const detail       = Array.isArray(clips_detail) ? clips_detail : [];
+    const readyCount   = detail.filter((c) => c.stage === 'ready').length;
+    const failedCount  = detail.filter((c) => c.stage === 'didnt_pass').length;
+    terminalHtml = `
+      <div class="source-terminal-summary">
+        <a href="#queue-ready"   class="source-terminal-link source-terminal-link--ready">
+          ${readyCount} ready
+        </a>
+        <span class="source-terminal-sep"> / </span>
+        <a href="#queue-failed"  class="source-terminal-link source-terminal-link--failed">
+          ${failedCount} didn't pass
+        </a>
+      </div>`;
+  }
+
+  // ── Error block (failed) ────────────────────────────────────────────────────
   let errorHtml = '';
-  if (isFailed && src.stage_error) {
-    const full      = src.stage_error;
-    const truncated = full.length > 200;
+  if (isFailed && stage_error) {
+    const truncated = stage_error.length > 200;
     errorHtml = `
       <div class="source-stage-error">
         ${!truncated
-          ? `<p class="source-error-text">${_esc(full)}</p>`
+          ? `<p class="source-error-text">${_esc(stage_error)}</p>`
           : `<details class="source-error-details">
-               <summary class="source-error-summary">${_esc(full.slice(0, 200))}…</summary>
-               <p class="source-error-full">${_esc(full)}</p>
+               <summary class="source-error-summary">${_esc(stage_error.slice(0, 200))}…</summary>
+               <p class="source-error-full">${_esc(stage_error)}</p>
              </details>`
         }
       </div>`;
   }
 
   return `
-    <article class="source-card source-inprogress-card${isFailed ? ' source-card--failed' : ''}"
-             data-source-id="${_esc(src.source_id)}">
+    <article class="source-card source-inprogress-card${isFailed ? ' source-card--failed' : ''}${isComplete ? ' source-card--complete' : ''}"
+             data-source-id="${_esc(source_id)}">
       <div class="source-card-media">${thumbHtml}</div>
       <div class="source-card-body">
         <div class="source-card-title">
-          <a href="${_esc(src.url)}" target="_blank" rel="noopener noreferrer" class="source-title-link">
-            ${_esc(src.title || src.source_id)}
+          <a href="${_esc(url)}" target="_blank" rel="noopener noreferrer" class="source-title-link">
+            ${_esc(title || source_id)}
           </a>
         </div>
-        <div class="chips-row" style="margin-bottom:6px">
-          <span class="chip">${_platformIcon(src.platform)} ${_esc(src.platform || '—')}</span>
-          ${src.author_handle ? `<span class="chip">@${_esc(src.author_handle)}</span>` : ''}
-          <span class="chip">${_esc(src.campaign)}</span>
-          <span class="chip ${isFailed ? 'chip-amber' : 'chip-accent'}">${_esc(stageText)}</span>
-        </div>
+        ${chipsRow}
         ${barHtml}
-        ${identifiedHtml}
-        ${Array.isArray(src.clips_detail) && src.clips_detail.length ? _buildClipsDetailHtml(src.clips_detail) : ''}
+        ${captionHtml}
+        ${chipRailHtml}
+        ${elapsedHtml}
+        ${terminalHtml}
         ${errorHtml}
       </div>
     </article>`;
 }
 
-// ── History card builder ──────────────────────────────────────────────────────
+// ── In-progress panel render ──────────────────────────────────────────────────
+
+function _renderInProgress() {
+  if (!_container) return;
+  const section = _container.querySelector('.sources-inprogress-list');
+  if (!section) return;
+
+  if (_sourceStates.size === 0) {
+    section.innerHTML = `
+      <div class="sources-inprogress-empty text-muted">
+        No sources currently processing.
+      </div>`;
+    return;
+  }
+
+  section.innerHTML = Array.from(_sourceStates.values())
+    .map(_buildProgressCard)
+    .join('');
+}
+
+/** Debounced re-render — batch rapid event bursts into one paint. */
+function _scheduleRender() {
+  if (_renderPending) return;
+  _renderPending = true;
+  requestAnimationFrame(() => {
+    _renderPending = false;
+    _renderInProgress();
+  });
+}
+
+// ── Event application ─────────────────────────────────────────────────────────
+
+/**
+ * Apply a single parsed SSE event to the live state for that source.
+ * The event wire schema (§2):
+ *   { v, source_id, ts, stage, clip_id, progress: {n, total}, status, detail, reason }
+ *
+ * @param {object} state  Reference from _sourceStates (mutated in-place)
+ * @param {object} evt    Parsed SSE JSON
+ * @param {string} [sseId]  SSE `id:` field (Last-Event-ID)
+ */
+function _applyEvent(state, evt, sseId) {
+  if (!evt || evt.v !== 1) return;
+
+  state.stage = evt.stage;
+  if (evt.detail) state.latest_detail = evt.detail;
+
+  // Track latest_ts as Date.now() ms for stalled detection
+  state.latest_ts = typeof evt.ts === 'string' ? new Date(evt.ts).getTime() : Date.now();
+
+  if (sseId != null) state.last_event_id = String(sseId);
+
+  // Update progress counters
+  if (evt.progress) {
+    if (evt.progress.total != null) state.progress_total = evt.progress.total;
+    if (evt.progress.n     != null) state.progress_n     = evt.progress.n;
+  }
+
+  // Per-clip clip_detail update
+  if (evt.clip_id != null) {
+    if (!Array.isArray(state.clips_detail)) state.clips_detail = [];
+
+    let clip = state.clips_detail.find((c) => c.clip_id === evt.clip_id);
+    if (!clip) {
+      clip = { clip_id: evt.clip_id, stage: '', status: '', correction_attempts: 0, reason: null };
+      state.clips_detail.push(clip);
+    }
+
+    clip.stage  = evt.stage;
+    clip.status = evt.status || '';
+
+    if (evt.stage === 'correction') {
+      clip.correction_attempts = (clip.correction_attempts || 0) + 1;
+      if (evt.reason) clip.reason = evt.reason;
+    }
+    if ((evt.stage === 'didnt_pass' || evt.stage === 'judging') && evt.reason) {
+      clip.reason = evt.reason;
+    }
+  }
+}
+
+// ── SSE transport per source ──────────────────────────────────────────────────
+
+/** Count how many sources currently hold an open EventSource. */
+function _activeSseCount() {
+  let n = 0;
+  for (const conn of _sourceConns.values()) {
+    if (conn.esHandle) n++;
+  }
+  return n;
+}
+
+/**
+ * Fetch the state snapshot for one source and merge it into _sourceStates.
+ * Used for: initial render, polling fallback, and SSE reconnect seeding.
+ */
+async function _fetchAndMergeState(sourceId) {
+  if (!_ctx) return;
+  try {
+    const snap = await _ctx.mockFetch(
+      () => _ctx.api.getSourceEventsState(sourceId),
+      () => {
+        // Mock fallback: look up by sourceId in inProgressScenes
+        const scene = localStorage.getItem('mockScene') || 'midRendering';
+        const scenes = _ctx.fixtures.inProgressScenes || {};
+        const list   = scenes[scene] || [];
+        return list.find((s) => s.source_id === sourceId) || null;
+      }
+    );
+    if (!snap) return;
+    // Merge: preserve local latest_ts if newer (avoid stall regression on stale snap)
+    const existing = _sourceStates.get(sourceId);
+    const snapTs   = snap.latest_ts
+      ? (typeof snap.latest_ts === 'number' ? snap.latest_ts : new Date(snap.latest_ts).getTime())
+      : 0;
+    const existing_ts = existing?.latest_ts || 0;
+    const merged = { ...snap };
+    if (existing_ts > snapTs) merged.latest_ts = existing_ts;
+    _sourceStates.set(sourceId, merged);
+  } catch {
+    // Non-fatal; keep existing state
+  }
+}
+
+/**
+ * Start polling the state endpoint every POLL_MS_SOURCE for one source.
+ * Used when: SSE cap exceeded, or after 3 consecutive SSE errors.
+ */
+function _startPollForSource(sourceId) {
+  const conn = _sourceConns.get(sourceId);
+  if (!conn || conn.pollHandle) return;
+
+  const tick = async () => {
+    await _fetchAndMergeState(sourceId);
+    _scheduleRender();
+  };
+  conn.pollHandle = setInterval(tick, POLL_MS_SOURCE);
+}
+
+/**
+ * Open an EventSource for one source.
+ * - Passes last_event_id as query param for initial connect; browser sends
+ *   Last-Event-ID header on any automatic reconnect (native SSE resume).
+ * - After 3 consecutive errors: closes ES, starts polling fallback.
+ */
+function _openSSE(sourceId) {
+  const conn = _sourceConns.get(sourceId);
+  if (!conn) return;
+  if (conn.esHandle) { conn.esHandle.close(); conn.esHandle = null; }
+
+  const state  = _sourceStates.get(sourceId);
+  const lastId = state?.last_event_id;
+  const qs     = lastId ? `?last_event_id=${encodeURIComponent(lastId)}` : '';
+  const url    = `/api/sources/${encodeURIComponent(sourceId)}/events${qs}`;
+
+  let es;
+  try {
+    es = new EventSource(url);
+  } catch {
+    // EventSource constructor failed — fall back to polling immediately
+    _startPollForSource(sourceId);
+    return;
+  }
+
+  conn.esHandle   = es;
+  conn.errorCount = 0;
+
+  es.addEventListener('progress', (evt) => {
+    conn.errorCount = 0;  // reset consecutive error counter on any message
+    try {
+      const parsed = JSON.parse(evt.data);
+      const src    = _sourceStates.get(sourceId);
+      if (src) {
+        _applyEvent(src, parsed, evt.lastEventId);
+        _scheduleRender();
+      }
+    } catch { /* ignore parse errors */ }
+  });
+
+  es.addEventListener('error', () => {
+    conn.errorCount = (conn.errorCount || 0) + 1;
+    if (conn.errorCount >= 3) {
+      // Three consecutive errors — give up on SSE, poll instead
+      es.close();
+      conn.esHandle = null;
+      _startPollForSource(sourceId);
+    }
+    // For fewer errors: let EventSource retry natively (browser respects retry: 3000)
+  });
+}
+
+/**
+ * Connect one source: fetch initial state snapshot, then open SSE or poll
+ * depending on how many SSE slots are available.
+ */
+async function _connectSource(sourceId) {
+  if (_sourceConns.has(sourceId)) return;  // already managed
+
+  // Register connection record
+  _sourceConns.set(sourceId, { esHandle: null, pollHandle: null, errorCount: 0 });
+
+  // Fetch initial snapshot
+  await _fetchAndMergeState(sourceId);
+  _scheduleRender();
+
+  // Decide: SSE or poll
+  if (_activeSseCount() < MAX_SSE) {
+    _openSSE(sourceId);
+  } else {
+    _startPollForSource(sourceId);
+  }
+}
+
+/** Disconnect and clean up all transports for one source. */
+function _disconnectSource(sourceId) {
+  const conn = _sourceConns.get(sourceId);
+  if (!conn) return;
+  if (conn.esHandle)   { conn.esHandle.close();     conn.esHandle   = null; }
+  if (conn.pollHandle) { clearInterval(conn.pollHandle); conn.pollHandle = null; }
+  _sourceConns.delete(sourceId);
+  _sourceStates.delete(sourceId);
+}
+
+/** Disconnect all managed sources and stop discovery polling. */
+function _cleanupLive() {
+  if (_listTimer) { clearInterval(_listTimer); _listTimer = null; }
+  for (const id of [..._sourceConns.keys()]) _disconnectSource(id);
+}
+
+// ── In-progress source discovery ──────────────────────────────────────────────
+
+/**
+ * Fetch the current list of in-progress sources and connect any new ones.
+ * Removed sources (no longer in_progress) are disconnected and dropped.
+ */
+async function _discoverSources() {
+  if (!_ctx) return;
+
+  let list;
+  try {
+    list = await _ctx.mockFetch(
+      () => _ctx.api.getSourcesProgress(),
+      () => {
+        // In mock mode, the discovery list comes from inProgressScenes
+        const scene  = localStorage.getItem('mockScene') || 'midRendering';
+        const scenes = _ctx.fixtures.inProgressScenes || {};
+        return scenes[scene] || [];
+      }
+    );
+  } catch {
+    return;  // Network failure — keep existing connections
+  }
+
+  if (!Array.isArray(list)) return;
+
+  const currentIds = new Set(list.map((s) => s.source_id));
+
+  // Connect newly discovered sources
+  for (const src of list) {
+    if (!_sourceConns.has(src.source_id)) {
+      // Seed the state map with the list-level fields so we can render
+      // something immediately before the state-endpoint fetch completes.
+      _sourceStates.set(src.source_id, {
+        source_id:      src.source_id,
+        stage:          src.stage || 'queued',
+        title:          src.title || src.source_id,
+        url:            src.url || '#',
+        platform:       src.platform || '',
+        author_handle:  src.author_handle || null,
+        campaign:       src.campaign || '',
+        thumbnail_url:  src.thumbnail_url || null,
+        stage_error:    src.stage_error || null,
+        clips_detail:   src.clips_detail || [],
+        last_event_id:  null,
+        progress_n:     src.clips_rendered || null,
+        progress_total: src.clips_identified || null,
+        latest_detail:  null,
+        latest_ts:      null,
+        stage_elapsed:  {},
+      });
+      await _connectSource(src.source_id);
+    }
+  }
+
+  // Disconnect sources that are no longer in-progress
+  for (const id of [..._sourceConns.keys()]) {
+    if (!currentIds.has(id)) _disconnectSource(id);
+  }
+
+  _scheduleRender();
+}
+
+// ── Live updates init ─────────────────────────────────────────────────────────
+
+function _startLiveUpdates() {
+  _cleanupLive();
+
+  // Mock mode: load directly from fixture; no SSE
+  if (localStorage.getItem('mock') === '1') {
+    const scene  = localStorage.getItem('mockScene') || 'midRendering';
+    const scenes = (_ctx?.fixtures?.inProgressScenes) || {};
+    const list   = scenes[scene] || [];
+    _sourceStates.clear();
+    for (const snap of list) {
+      _sourceStates.set(snap.source_id, {
+        ...snap,
+        // Ensure latest_ts is a ms number for stalled detection
+        latest_ts: snap.latest_ts
+          ? (typeof snap.latest_ts === 'number' ? snap.latest_ts : new Date(snap.latest_ts).getTime())
+          : null,
+      });
+    }
+    _renderInProgress();
+    return;
+  }
+
+  // Live mode: discover sources, then poll for new ones periodically
+  _discoverSources();
+  _listTimer = setInterval(_discoverSources, DISCOVER_MS);
+}
+
+// ── History section helpers (unchanged from v2) ───────────────────────────────
 
 function _statusLabel(status) {
   switch (status) {
@@ -300,7 +768,7 @@ function _buildHistoryCard(src) {
 
   const thumbHtml = src.thumbnail_url
     ? `<img class="source-thumb" src="${_esc(src.thumbnail_url)}" alt="" loading="lazy"
-          onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+           onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
        <div class="source-thumb-fallback" style="display:none">${_platformIcon(src.platform)}</div>`
     : `<div class="source-thumb-fallback">${_platformIcon(src.platform)}</div>`;
 
@@ -321,14 +789,12 @@ function _buildHistoryCard(src) {
        </details>`
     : `<div class="source-clips-empty text-muted">No clips yet</div>`;
 
-  // Per-row counts (new)
-  const hasCountData = src.clips_rendered != null || src.clips_approved != null;
   const parts = [];
   if (src.clips_identified != null) parts.push(`${src.clips_identified} identified`);
   if (src.clips_rendered   != null) parts.push(`${src.clips_rendered} rendered`);
   if (src.clips_approved   != null) parts.push(`${src.clips_approved} approved`);
   if (src.clips_rejected   != null) parts.push(`${src.clips_rejected} rejected`);
-  const countsHtml = hasCountData
+  const countsHtml = parts.length
     ? `<div class="source-clip-counts text-muted">${parts.join(' · ')}</div>`
     : '';
 
@@ -358,7 +824,7 @@ function _buildHistoryCard(src) {
     </article>`;
 }
 
-// ── Filter (history search) ───────────────────────────────────────────────────
+// ── Filter ────────────────────────────────────────────────────────────────────
 
 function _filter(sources, query) {
   if (!query) return sources;
@@ -369,25 +835,11 @@ function _filter(sources, query) {
   });
 }
 
-// ── Render helpers ────────────────────────────────────────────────────────────
+// ── Render history ────────────────────────────────────────────────────────────
 
-function _renderInProgress(sources, container) {
-  const section = container.querySelector('.sources-inprogress-list');
-  if (!section) return;
-
-  if (!Array.isArray(sources) || sources.length === 0) {
-    section.innerHTML = `
-      <div class="sources-inprogress-empty text-muted">
-        No sources currently processing.
-      </div>`;
-    return;
-  }
-
-  section.innerHTML = sources.map(_buildProgressCard).join('');
-}
-
-function _renderHistory(sources, query, container) {
-  const list = container.querySelector('.sources-history-list');
+function _renderHistory(sources, query) {
+  if (!_container) return;
+  const list = _container.querySelector('.sources-history-list');
   if (!list) return;
   const filtered = _filter(sources, query);
 
@@ -410,61 +862,6 @@ function _renderHistory(sources, query, container) {
   list.innerHTML = filtered.map(_buildHistoryCard).join('');
 }
 
-// ── Live-update fetch (used by both polling and initial load) ─────────────────
-
-async function _fetchAndRenderProgress(container) {
-  if (!_ctx) return;
-  try {
-    const sources = await _ctx.mockFetch(
-      () => _ctx.api.getSourcesProgress(),
-      () => _ctx.fixtures.sourcesProgress || [],
-    );
-    _renderInProgress(sources, container);
-  } catch {
-    // Non-fatal — show whatever we already have
-  }
-}
-
-// ── SSE + polling lifecycle ───────────────────────────────────────────────────
-
-function _startLiveUpdates(container) {
-  _cleanupLive();
-
-  // Immediate first fetch so the panel shows data before the first SSE event
-  _fetchAndRenderProgress(container);
-
-  let lastPayloadStr = null;
-
-  try {
-    // Auth rides the ce_session cookie; EventSource cannot send custom headers
-    const es = new EventSource('/api/sources/stream');
-    _esHandle = es;
-
-    es.addEventListener('progress', (evt) => {
-      try {
-        // Avoid re-rendering if the payload did not change
-        if (evt.data === lastPayloadStr) return;
-        lastPayloadStr = evt.data;
-        const parsed = JSON.parse(evt.data);
-        if (Array.isArray(parsed.sources)) {
-          _renderInProgress(parsed.sources, container);
-        }
-      } catch { /* ignore parse errors */ }
-    });
-
-    es.addEventListener('error', () => {
-      if (_esHandle) { _esHandle.close(); _esHandle = null; }
-      // Fall back to polling every 5 s; avoids duplicate interval on repeated errors
-      if (!_pollHandle) {
-        _pollHandle = setInterval(() => _fetchAndRenderProgress(container), 5000);
-      }
-    });
-  } catch {
-    // EventSource constructor failed (unsupported env) — go straight to polling
-    _pollHandle = setInterval(() => _fetchAndRenderProgress(container), 5000);
-  }
-}
-
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 /**
@@ -472,13 +869,17 @@ function _startLiveUpdates(container) {
  * @param {{ api, fixtures, mockFetch, toast, onUnauthorized }} ctx
  */
 export function initSources(container, ctx) {
-  // Tear down any live handles from a prior session (e.g. after logout → login)
+  // Clean up prior session
   _cleanupLive();
   if (_esObserver) { _esObserver.disconnect(); _esObserver = null; }
-  _ctx = ctx;
+
+  _ctx       = ctx;
+  _container = container;
+  _sourceStates.clear();
+  _sourceConns.clear();
 
   let _historySources = [];
-  let _query = '';
+  let _query          = '';
 
   // ── DOM skeleton ────────────────────────────────────────────────────────────
   container.innerHTML = `
@@ -504,48 +905,42 @@ export function initSources(container, ctx) {
       </div>
     </div>`;
 
-  // ── SSE / polling for in-progress ──────────────────────────────────────────
-  _startLiveUpdates(container);
+  // ── Live in-progress updates ────────────────────────────────────────────────
+  _startLiveUpdates();
 
-  // Watch for the view being activated/deactivated so we can pause/resume SSE.
-  // app.js toggles .active on the container when switching tabs.
+  // Pause/resume live updates when the view is deactivated/reactivated
   _esObserver = new MutationObserver(() => {
     if (container.classList.contains('active')) {
-      // Returned to this view — restart live feed
-      _startLiveUpdates(container);
+      _startLiveUpdates();
     } else {
-      // Left this view — stop to save connections / battery
       _cleanupLive();
     }
   });
   _esObserver.observe(container, { attributeFilter: ['class'] });
 
-  // ── History fetch ──────────────────────────────────────────────────────────
+  // ── History fetch ───────────────────────────────────────────────────────────
   ctx.mockFetch(
     () => ctx.api.getSources(),
     () => ctx.fixtures.sources || [],
   ).then((data) => {
     _historySources = Array.isArray(data) ? data : [];
-    _renderHistory(_historySources, _query, container);
+    _renderHistory(_historySources, _query);
   }).catch((err) => {
-    if (err && err.status === 401) {
-      ctx.onUnauthorized();
-      return;
-    }
+    if (err && err.status === 401) { ctx.onUnauthorized(); return; }
     const histList = container.querySelector('.sources-history-list');
     if (histList) {
       histList.innerHTML = `<div class="sources-empty text-muted">Could not load sources. Check your connection.</div>`;
     }
   });
 
-  // ── History search ─────────────────────────────────────────────────────────
+  // ── History search ──────────────────────────────────────────────────────────
   const searchEl = container.querySelector('.sources-search');
   let _debounce  = null;
   searchEl.addEventListener('input', () => {
     clearTimeout(_debounce);
     _debounce = setTimeout(() => {
       _query = searchEl.value.trim();
-      _renderHistory(_historySources, _query, container);
+      _renderHistory(_historySources, _query);
     }, 200);
   });
 }

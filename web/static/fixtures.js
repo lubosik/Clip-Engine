@@ -552,6 +552,135 @@ export const approvedClips = [
   },
 ];
 
+// ── Event-state snapshots for in-progress panel mock mode ─────────────────────
+// Shape mirrors GET /api/sources/{id}/events/state response (§3 of PROGRESS_EVENTS_CONTRACTS.md).
+// Set localStorage.mockScene to one of the keys below to show that UI state.
+// Consumed by sources.js when localStorage.mock === "1".
+
+const _nowMs = Date.now();
+const _msAgo = (ms) => new Date(_nowMs - ms).toISOString();
+
+export const inProgressScenes = {
+  // 1. Empty — no sources currently processing
+  empty: [],
+
+  // 2. Mid-identifying — one source reading the transcript, no clips yet
+  midIdentifying: [
+    {
+      source_id: 'youtube:mock_identifying',
+      stage: 'identifying',
+      title: 'Advanced Peptide Protocols for Recovery — Full Deep Dive',
+      url: 'https://youtube.com/watch?v=mock_ident',
+      platform: 'youtube',
+      author_handle: 'PeptideScience',
+      campaign: 'peptides',
+      thumbnail_url: null,
+      stage_error: null,
+      clips_detail: [],
+      last_event_id: '15',
+      progress_n: null,
+      progress_total: null,
+      latest_detail: 'Reading transcript / selecting moments',
+      latest_ts: _msAgo(12_000),
+      stage_elapsed: { queued: 3, transcribing: 42, downloading: 28, identifying: 37 },
+    },
+  ],
+
+  // 3. Mid-rendering — 8 clips found, 5 rendered, mixed chip states
+  midRendering: [
+    {
+      source_id: 'youtube:mock_rendering',
+      stage: 'rendering',
+      title: 'BPC-157 Full Breakdown — Dosing, Timing and Mechanism',
+      url: 'https://youtube.com/watch?v=mock_render',
+      platform: 'youtube',
+      author_handle: 'PeptideScience',
+      campaign: 'peptides',
+      thumbnail_url: null,
+      stage_error: null,
+      clips_detail: [
+        { clip_id: 101, stage: 'ready',       status: 'done',    correction_attempts: 0, reason: null },
+        { clip_id: 102, stage: 'rendering',   status: 'running', correction_attempts: 0, reason: null },
+        { clip_id: 103, stage: 'reviewing',   status: 'running', correction_attempts: 0, reason: null },
+        { clip_id: 104, stage: 'correction',  status: 'running', correction_attempts: 1,
+          reason: 'Caption burns are illegible at playback speed' },
+        { clip_id: 105, stage: 'rendering',   status: 'running', correction_attempts: 0, reason: null },
+        { clip_id: 106, stage: 'ready',       status: 'done',    correction_attempts: 1, reason: null },
+        { clip_id: 107, stage: 'didnt_pass',  status: 'done',    correction_attempts: 2,
+          reason: 'Hook text absent from first 5 frames; watermark not visible after 2 correction attempts' },
+        { clip_id: 108, stage: 'rendering',   status: 'running', correction_attempts: 0, reason: null },
+      ],
+      last_event_id: '58',
+      progress_n: 5,
+      progress_total: 8,
+      latest_detail: 'Creating clip 5 of 8 — rendering on Modal',
+      latest_ts: _msAgo(8_000),
+      stage_elapsed: { queued: 4, transcribing: 51, downloading: 33, identifying: 62,
+                       identified: 5, rendering: 124 },
+    },
+  ],
+
+  // 4. Correction in progress — one clip being re-rendered after reviewer feedback
+  correctionInProgress: [
+    {
+      source_id: 'youtube:mock_correction',
+      stage: 'correction',
+      title: 'GHK-Cu Peptide — Full Science Review',
+      url: 'https://youtube.com/watch?v=mock_correct',
+      platform: 'youtube',
+      author_handle: 'BiohackLab',
+      campaign: 'peptides',
+      thumbnail_url: null,
+      stage_error: null,
+      clips_detail: [
+        { clip_id: 201, stage: 'ready',      status: 'done',    correction_attempts: 0, reason: null },
+        { clip_id: 202, stage: 'ready',      status: 'done',    correction_attempts: 1, reason: null },
+        { clip_id: 203, stage: 'correction', status: 'running', correction_attempts: 1,
+          reason: 'Speaker not centred in 9:16 crop — re-rendering with adjusted face track' },
+        { clip_id: 204, stage: 'rendering',  status: 'running', correction_attempts: 0, reason: null },
+      ],
+      last_event_id: '72',
+      progress_n: 3,
+      progress_total: 4,
+      latest_detail: 'Correcting clip — applying adjusted face track (fix 1/2)',
+      latest_ts: _msAgo(22_000),
+      stage_elapsed: { queued: 3, transcribing: 48, downloading: 31, identifying: 55,
+                       identified: 4, rendering: 180, correction: 22 },
+    },
+  ],
+
+  // 5. Complete — all clips processed; panel shows terminal summary
+  complete: [
+    {
+      source_id: 'youtube:mock_complete',
+      stage: 'complete',
+      title: 'Semax and Selank — Nootropic Peptides Explained',
+      url: 'https://youtube.com/watch?v=mock_complete',
+      platform: 'youtube',
+      author_handle: 'BiohackLab',
+      campaign: 'peptides',
+      thumbnail_url: null,
+      stage_error: null,
+      clips_detail: [
+        { clip_id: 301, stage: 'ready',      status: 'done', correction_attempts: 0, reason: null },
+        { clip_id: 302, stage: 'ready',      status: 'done', correction_attempts: 0, reason: null },
+        { clip_id: 303, stage: 'didnt_pass', status: 'done', correction_attempts: 1,
+          reason: 'Hook text missing from first 3 seconds' },
+        { clip_id: 304, stage: 'ready',      status: 'done', correction_attempts: 0, reason: null },
+        { clip_id: 305, stage: 'didnt_pass', status: 'done', correction_attempts: 2,
+          reason: 'Low formula score after 2 correction attempts' },
+      ],
+      last_event_id: '95',
+      progress_n: 5,
+      progress_total: 5,
+      latest_detail: "3 ready · 2 didn't pass · source exhausted",
+      latest_ts: _msAgo(5_000),
+      stage_elapsed: { queued: 3, transcribing: 51, downloading: 30, identifying: 58,
+                       identified: 4, rendering: 220, complete: 5 },
+    },
+  ],
+};
+
 // Approval-rate time series — keyed by campaign name
 export const approvalRate = {
   peptides: {

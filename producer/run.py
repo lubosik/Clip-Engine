@@ -264,11 +264,31 @@ def _process_source(
                 set_source_stage(session, source_id, "failed", error=str(probe_exc)[:500])
                 return []
 
-        candidates = rank_clips(
-            segments, comment_summary, campaign_cfg.ranking,
-            preference_context=preference_context,
-            sentence_spans=sentence_spans,
-        )
+        try:
+            candidates = rank_clips(
+                segments, comment_summary, campaign_cfg.ranking,
+                preference_context=preference_context,
+                sentence_spans=sentence_spans,
+            )
+        except Exception as rank_exc:
+            # Check if this is a RankingUnavailable (transient LLM parse failure).
+            # Import here to avoid a circular-at-module-level dependency.
+            try:
+                from core.llm import RankingUnavailable as _RankingUnavailable
+                if isinstance(rank_exc, _RankingUnavailable):
+                    log.warning(
+                        "RankingUnavailable for source %s: %s "
+                        "— leaving status untouched (retryable)",
+                        source_id, rank_exc,
+                        extra={"source_id": source_id},
+                    )
+                    set_source_stage(session, source_id, "failed", error=str(rank_exc)[:500])
+                    session.rollback()
+                    return []
+            except ImportError:
+                pass
+            raise
+
         selected = select_clips(candidates, used_ranges, campaign_cfg.ranking)
 
         if not selected:

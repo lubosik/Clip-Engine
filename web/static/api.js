@@ -183,6 +183,13 @@ export const api = {
     return request('POST', `/api/campaigns/${encodeURIComponent(campaign)}/videos`, { body });
   },
 
+  // Per-source event-state snapshot (initial render + polling fallback)
+  // GET /api/sources/{source_id}/events/state
+  // Returns: source row fields + clips_detail + last_event_id + stage_elapsed
+  getSourceEventsState(sourceId) {
+    return request('GET', `/api/sources/${encodeURIComponent(sourceId)}/events/state`);
+  },
+
   // Approval-rate time series — GET /api/analytics/approval-rate?campaign=X&weeks=N
   getApprovalRate(campaign, weeks = 8) {
     const qs = new URLSearchParams({ campaign, weeks: String(weeks) });

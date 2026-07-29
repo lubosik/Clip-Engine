@@ -1965,12 +1965,24 @@ def _source_row_to_dict(src: Any, *, session: Any = None) -> dict[str, Any]:
                     last_reasons = []
             else:
                 last_reasons = []
+        gate_status = getattr(clip, "gate_status", "pending") or "pending"
+        # Derive the chip micro-state (contracts §4): Clip rows have no .stage
+        # column; approximate from gate state + critic history.
+        if gate_status == "ready":
+            clip_stage = "ready"
+        elif gate_status == "didnt_pass":
+            clip_stage = "didnt_pass"
+        elif getattr(clip, "critic_reports", None):
+            clip_stage = "reviewing"
+        else:
+            clip_stage = "rendering"
         return {
-            "id": str(clip.id),
-            "gate_status": getattr(clip, "gate_status", "pending") or "pending",
+            "clip_id": clip.id,
+            "stage": clip_stage,
+            "gate_status": gate_status,
             "status": clip.status or "pending_review",
             "correction_attempts": getattr(clip, "correction_attempts", 0) or 0,
-            "last_failure_reasons": last_reasons,
+            "reason": (last_reasons[0] if last_reasons else None),
             "judge": judge_label,
         }
 
@@ -2051,6 +2063,10 @@ def _source_row_to_dict(src: Any, *, session: Any = None) -> dict[str, Any]:
         "exhaustion": exhaustion,
         # Per-clip detail for in-progress sources (contract §6)
         "clips_detail": clips_detail,
+        # Progress aliases the live panel reads (contracts §4): denominator is
+        # the ranked candidate count, numerator the clips rendered so far.
+        "progress_n": clips_rendered,
+        "progress_total": getattr(src, "clips_identified", None),
     }
 
 
@@ -2270,6 +2286,263 @@ async def stream_sources_progress(
                 logger.error("SSE progress emit failed: %s", exc)
 
             await asyncio.sleep(3)
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# /api/sources/{source_id}/events        — per-source SSE progress stream
+# /api/sources/{source_id}/events/state  — snapshot for initial render + polling
+# Contract: docs/PROGRESS_EVENTS_CONTRACTS.md §3
+# ---------------------------------------------------------------------------
+
+def _url_decode_source_id(raw: str) -> str:
+    """URL-decode a path segment that may contain URL-encoded colons (%3A)."""
+    from urllib.parse import unquote
+    return unquote(raw)
+
+
+@app.get("/api/sources/{source_id:path}/events/state")
+async def get_source_events_state(
+    source_id: str,
+    _auth: None = Depends(require_auth),
+) -> dict[str, Any]:
+    """GET /api/sources/{source_id}/events/state — snapshot for initial render.
+
+    Returns: source row fields + clips_detail + last_event_id + per-stage
+    elapsed times (derived from pipeline_events rows).
+
+    Callers load this on page-open, render the initial state, then subscribe
+    to the SSE stream for live deltas.  If the SSE stream fails ×3 the UI
+    falls back to polling this endpoint every 4s.
+    """
+    _db_required()
+
+    source_id = _url_decode_source_id(source_id)
+
+    try:
+        from sqlalchemy.orm import selectinload
+
+        def _fetch_state() -> dict[str, Any]:
+            try:
+                from core.models import PipelineEvent
+            except Exception:
+                PipelineEvent = None  # type: ignore[assignment]
+
+            with get_session() as session:
+                src = (
+                    session.query(Source)
+                    .options(selectinload(Source.clips))
+                    .filter(Source.source_id == source_id)
+                    .first()
+                )
+                if src is None:
+                    return {}
+
+                src_dict = _source_row_to_dict(src, session=session)
+
+                # last_event_id
+                last_event_id: int | None = None
+                per_stage_elapsed: dict[str, float] = {}
+                last_row: Any = None
+
+                if PipelineEvent is not None:
+                    try:
+                        last_row = (
+                            session.query(PipelineEvent)
+                            .filter(PipelineEvent.source_id == source_id)
+                            .order_by(PipelineEvent.id.desc())
+                            .first()
+                        )
+                        if last_row is not None:
+                            last_event_id = last_row.id
+
+                        # Per-stage elapsed: first event of each stage → now
+                        stage_rows = (
+                            session.query(PipelineEvent)
+                            .filter(PipelineEvent.source_id == source_id)
+                            .order_by(PipelineEvent.id.asc())
+                            .all()
+                        )
+                        stage_first: dict[str, Any] = {}
+                        now_utc = datetime.now(timezone.utc)
+                        for ev in stage_rows:
+                            if ev.stage not in stage_first:
+                                stage_first[ev.stage] = ev.created_at
+                        for stage_name, first_ts in stage_first.items():
+                            if isinstance(first_ts, datetime):
+                                if first_ts.tzinfo is None:
+                                    first_ts = first_ts.replace(tzinfo=timezone.utc)
+                                per_stage_elapsed[stage_name] = round(
+                                    (now_utc - first_ts).total_seconds(), 1
+                                )
+                    except Exception as ev_exc:
+                        logger.debug("events/state: event query failed: %s", ev_exc)
+
+                return {
+                    **src_dict,
+                    "last_event_id": last_event_id,
+                    "stage_elapsed": per_stage_elapsed,
+                    "latest_detail": (last_row.detail if last_row is not None else None),
+                    "latest_ts": (
+                        last_row.created_at.isoformat()
+                        if last_row is not None and last_row.created_at is not None
+                        else None
+                    ),
+                }
+
+        result = await anyio.to_thread.run_sync(_fetch_state)
+        if not result:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": f"Source {source_id!r} not found", "code": 404},
+            )
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if "DATABASE_URL" in str(exc):
+            # DB not configured (dev/test without a database) → same 503 the
+            # rest of the API uses for a missing DB layer, not a 500.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"error": "Database not configured", "code": 503},
+            )
+        logger.error("get_source_events_state failed source_id=%s: %s", source_id, exc,
+                     exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to fetch source state", "code": 500},
+        )
+
+
+@app.get("/api/sources/{source_id:path}/events")
+async def stream_source_events(
+    request: Request,
+    source_id: str,
+    last_event_id: int | None = Query(default=None, alias="last_event_id"),
+    _auth: None = Depends(require_auth),
+) -> StreamingResponse:
+    """GET /api/sources/{source_id}/events — per-source SSE progress stream.
+
+    Auth: Bearer token OR ce_session cookie (EventSource cannot send headers).
+    Last-Event-ID header (or ?last_event_id=) resumes from a specific event.
+
+    Protocol:
+    - On connect: replay all pipeline_events rows with id > last_event_id for
+      this source (from DB), then tail every 2s.
+    - Heartbeat ': ping' every 15s.
+    - Hard cap: 30 minutes per connection.
+    - retry: 3000 (3 seconds) — client auto-reconnect interval.
+    - Headers: Cache-Control: no-cache, X-Accel-Buffering: no.
+    - Each SSE event id = pipeline_events.id (EventSource resumes natively).
+
+    The EXISTING /api/sources/stream endpoint is UNTOUCHED.
+    """
+    _db_required()
+
+    source_id = _url_decode_source_id(source_id)
+
+    # Resolve last_event_id from header first, then query param.
+    header_lei = request.headers.get("Last-Event-ID")
+    if header_lei is not None:
+        try:
+            last_event_id = int(header_lei)
+        except (ValueError, TypeError):
+            last_event_id = None
+
+    try:
+        from core.models import PipelineEvent
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "PipelineEvent model not available", "code": 503},
+        )
+
+    def _fetch_events_since(since_id: int | None) -> list[Any]:
+        """Sync DB query — fetch pipeline_events newer than since_id."""
+        try:
+            with get_session() as session:
+                q = session.query(PipelineEvent).filter(
+                    PipelineEvent.source_id == source_id
+                )
+                if since_id is not None:
+                    q = q.filter(PipelineEvent.id > since_id)
+                return q.order_by(PipelineEvent.id.asc()).all()
+        except Exception as exc:
+            logger.error("stream_source_events _fetch_events_since failed: %s", exc)
+            return []
+
+    def _source_terminal() -> bool:
+        """True when the source has reached a terminal stage (stream can end)."""
+        try:
+            with get_session() as session:
+                row = (
+                    session.query(Source.stage)
+                    .filter(Source.source_id == source_id)
+                    .first()
+                )
+            return bool(row) and row[0] in ("complete", "failed")
+        except Exception:
+            return False
+
+    async def _generate():
+        start_time = time.monotonic()
+        last_ping_time = start_time
+        # Env-configurable so tests don't sit on the real 30-min cap.
+        max_duration = float(os.environ.get("SSE_EVENTS_MAX_DURATION_S", "1800"))
+        current_last_id: int | None = last_event_id
+        terminal_flushes = 0
+
+        # Send retry interval to client
+        yield "retry: 3000\n\n"
+
+        while True:
+            now = time.monotonic()
+
+            if now - start_time >= max_duration:
+                break
+
+            if await request.is_disconnected():
+                break
+
+            # Heartbeat every ~15s
+            if now - last_ping_time >= 15:
+                yield ": ping\n\n"
+                last_ping_time = now
+
+            # Fetch new events
+            try:
+                rows = await anyio.to_thread.run_sync(
+                    lambda: _fetch_events_since(current_last_id)
+                )
+                for row in rows:
+                    from producer.progress_events import to_wire
+                    payload = json.dumps(to_wire(row))
+                    event_id = getattr(row, "id", None)
+                    yield f"id: {event_id}\nevent: progress\ndata: {payload}\n\n"
+                    if event_id is not None:
+                        current_last_id = event_id
+            except Exception as exc:
+                logger.error("stream_source_events emit failed: %s", exc)
+
+            # End the stream once the run is over (one extra poll cycle so the
+            # terminal event is flushed first) — clients see a clean close
+            # instead of idling until the cap.
+            if await anyio.to_thread.run_sync(_source_terminal):
+                terminal_flushes += 1
+                if terminal_flushes >= 2:
+                    break
+
+            await asyncio.sleep(2)
 
     return StreamingResponse(
         _generate(),

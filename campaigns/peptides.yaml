@@ -68,7 +68,7 @@ ranking:
   clip_length: [18, 60]
   max_clips_per_source: 8
   exhaust_source: true          # reuse the same podcast across runs, new moments only
-  min_score: 0.62
+  min_score: 0.55  # lowered 2026-07-29 w/ exhaustive-mining mandate; critic gates quality
   stance: "pro-peptide: content must present peptides positively or neutrally-curious; never framing peptides as inferior, disappointing, or beaten by alternatives"
   ranking_rules: |
     You are selecting short-form clips for VICI PEPTIDES. Optimise for
@@ -100,7 +100,23 @@ ranking:
       mewing, and the overlap of hormones/peptides with looking better.
       Content about or by "Clavicular" and natural looksmaxxing fits here.
 
-    WHAT MAKES A GOOD CLIP (be strict):
+    MINE EXHAUSTIVELY (this is a mining job, not a shortlist): a clip is ANY
+    self-contained moment that gives the viewer real value or invokes emotion,
+    shows peptides in a good light, and triggers buying intent. Sweep the WHOLE
+    transcript start to finish and identify EVERY moment that fits one of
+    these categories:
+    - WHAT IT DOES: what a specific peptide/compound does and how it works.
+    - EFFECT/BENEFIT: the concrete outcome, result, or transformation.
+    - EXPERIENCE: a first-hand story or someone's real results.
+    - MISCONCEPTION: something people get wrong, corrected.
+    - MYTH BUSTED: a mainstream belief taken apart (these convert hard).
+    A long podcast on-topic for this campaign typically contains 10-30
+    qualifying moments — if you found only a handful, you almost certainly
+    stopped too early; re-scan the parts you skimmed. Return EVERY qualifying
+    moment up to the maximum, ordered best-first. Do NOT self-censor to a
+    "top few": volume matters, the review gate downstream handles quality.
+
+    WHAT MAKES A GOOD CLIP (strict about BOUNDARIES, not about volume):
     - COHERENCE IS MANDATORY. The clip MUST begin at the start of a complete
       spoken sentence/point and END at a natural finish of that point. It may
       never start or end mid-sentence, and must never sound like we dropped

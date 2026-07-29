@@ -414,6 +414,315 @@ def _db_total_render_jobs() -> int:
 
 
 # ---------------------------------------------------------------------------
+# Event-sequence helpers (§5 PROGRESS_EVENTS_CONTRACTS.md)
+# ---------------------------------------------------------------------------
+
+
+def _collect_events(source_id: str) -> list[dict]:
+    """Return all pipeline_events for source_id ordered by id (real DB query)."""
+    from core.db import get_session
+    from core.models import PipelineEvent
+
+    with get_session() as session:
+        rows = (
+            session.query(PipelineEvent)
+            .filter_by(source_id=source_id)
+            .order_by(PipelineEvent.id)
+            .all()
+        )
+        return [
+            {
+                "id": r.id,
+                "source_id": r.source_id,
+                "stage": r.stage,
+                "status": r.status,
+                "clip_id": r.clip_id,
+                "n": r.progress_n,
+                "total": r.progress_total,
+                "detail": r.detail or "",
+                "reason": r.reason,
+            }
+            for r in rows
+        ]
+
+
+def _assert_vocab_clean(events: list[dict], label: str) -> None:
+    """Assert every stage is in the §2 vocabulary (VALID_STAGES)."""
+    from producer.progress_events import VALID_STAGES
+    bad = [e["stage"] for e in events if e["stage"] not in VALID_STAGES]
+    assert not bad, (
+        f"{label}: unknown stage(s) emitted (not in §2 vocabulary): {bad}"
+    )
+
+
+def _assert_order(events: list[dict], earlier: str, later: str, label: str) -> None:
+    """Assert the first occurrence of 'earlier' comes before the first 'later'."""
+    stages = [e["stage"] for e in events]
+    idx_e = next((i for i, s in enumerate(stages) if s == earlier), None)
+    idx_l = next((i for i, s in enumerate(stages) if s == later), None)
+    assert idx_e is not None, (
+        f"{label}: stage {earlier!r} not found in events. stages={stages}"
+    )
+    assert idx_l is not None, (
+        f"{label}: stage {later!r} not found in events. stages={stages}"
+    )
+    assert idx_e < idx_l, (
+        f"{label}: {earlier!r}[{idx_e}] must precede {later!r}[{idx_l}]. stages={stages}"
+    )
+
+
+def _assert_clip_terminals(events: list[dict], label: str) -> None:
+    """Assert each clip_id that appears in events has a terminal event (ready/didnt_pass)."""
+    TERMINAL = {"ready", "didnt_pass"}
+    clip_ids = {e["clip_id"] for e in events if e["clip_id"] is not None}
+    for cid in clip_ids:
+        clip_evs = [e for e in events if e["clip_id"] == cid]
+        terminals = [e for e in clip_evs if e["stage"] in TERMINAL]
+        assert terminals, (
+            f"{label}: clip_id={cid} has no terminal event (ready/didnt_pass). "
+            f"clip stages={[e['stage'] for e in clip_evs]}"
+        )
+
+
+def _assert_replay(source_id: str, label: str) -> None:
+    """Assert Last-Event-ID replay: query id > mid_id returns exactly the later events."""
+    from core.db import get_session
+    from core.models import PipelineEvent
+
+    with get_session() as session:
+        all_rows = (
+            session.query(PipelineEvent)
+            .filter_by(source_id=source_id)
+            .order_by(PipelineEvent.id)
+            .all()
+        )
+
+    if len(all_rows) < 3:
+        return  # not enough events to meaningfully test replay
+
+    mid_idx = len(all_rows) // 2
+    mid_id = all_rows[mid_idx - 1].id
+    expected_ids = [r.id for r in all_rows[mid_idx:]]
+
+    with get_session() as session:
+        replayed = (
+            session.query(PipelineEvent)
+            .filter(
+                PipelineEvent.source_id == source_id,
+                PipelineEvent.id > mid_id,
+            )
+            .order_by(PipelineEvent.id)
+            .all()
+        )
+    got_ids = [r.id for r in replayed]
+    assert got_ids == expected_ids, (
+        f"{label}: replay from id={mid_id} returned {got_ids}, "
+        f"expected {expected_ids}"
+    )
+
+
+def _event_coverage_str(label: str, events: list[dict]) -> str:
+    """Build a human-readable event-coverage summary string."""
+    from collections import Counter
+    stage_status = Counter(f"{e['stage']}:{e['status']}" for e in events)
+    lines = [f"  Event coverage — {label}: {len(events)} events total"]
+    for key in sorted(stage_status):
+        lines.append(f"    {key} × {stage_status[key]}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Per-scenario event-sequence assertion functions (§5)
+# ---------------------------------------------------------------------------
+
+
+def assert_event_sequence_s1(ctx: HarnessContext) -> None:  # noqa: ARG001
+    """S1 happy-path: §2 stage order, all clips terminal, replay works."""
+    events = _collect_events(_SRC_S1)
+
+    # Migration-008 table must have been created by Base.metadata.create_all
+    assert len(events) > 0, (
+        "S1: pipeline_events table returned no rows — "
+        "migration-008 PipelineEvent missing from models or not created by create_all"
+    )
+
+    _assert_vocab_clean(events, "S1")
+
+    # §2 pipeline order for happy path
+    _assert_order(events, "queued", "transcribing", "S1")
+    _assert_order(events, "transcribing", "downloading", "S1")
+    _assert_order(events, "downloading", "rendering", "S1")
+    _assert_order(events, "rendering", "reviewing", "S1")
+    _assert_order(events, "reviewing", "judging", "S1")
+    _assert_order(events, "judging", "ready", "S1")
+    _assert_order(events, "ready", "complete", "S1")
+
+    # queued first, complete last
+    stages = [e["stage"] for e in events]
+    assert stages[0] == "queued", (
+        f"S1: first stage should be 'queued', got {stages[0]!r}"
+    )
+    assert stages[-1] == "complete", (
+        f"S1: last stage should be 'complete', got {stages[-1]!r}"
+    )
+
+    # Every clip reaches a terminal event
+    _assert_clip_terminals(events, "S1")
+
+    # Happy path: no didnt_pass
+    assert not any(e["stage"] == "didnt_pass" for e in events), (
+        "S1: unexpected didnt_pass in happy path"
+    )
+
+    # Replay works
+    _assert_replay(_SRC_S1, "S1")
+
+
+def assert_event_sequence_s2(ctx: HarnessContext) -> None:  # noqa: ARG001
+    """S2 correction path: correction event with reason + attempt, re-render, ready terminal."""
+    events = _collect_events(_SRC_S2)
+    assert len(events) > 0, "S2: no events in pipeline_events"
+
+    _assert_vocab_clean(events, "S2")
+
+    # Correction event with reason and fix-attempt detail
+    correction_events = [e for e in events if e["stage"] == "correction"]
+    assert correction_events, "S2: no correction events"
+    assert any(e["reason"] is not None for e in correction_events), (
+        "S2: correction event missing reason"
+    )
+    assert any("fix" in (e["detail"] or "").lower() for e in correction_events), (
+        "S2: correction event detail missing 'fix' suffix"
+    )
+
+    # Rendering events ≥ 2 (initial + re-render)
+    r_start = [e for e in events if e["stage"] == "rendering" and e["status"] == "running"]
+    assert len(r_start) >= 2, (
+        f"S2: expected ≥2 rendering:running events (initial + re-render), got {len(r_start)}"
+    )
+
+    # rendering:done for re-render (§2 fix — per-render start/done)
+    r_done = [e for e in events if e["stage"] == "rendering" and e["status"] == "done"]
+    assert len(r_done) >= 2, (
+        f"S2: expected ≥2 rendering:done events (initial + re-render done), got {len(r_done)}"
+    )
+
+    # Correction event precedes the re-render
+    corr_idx = next(
+        i for i, e in enumerate(events)
+        if e["stage"] == "correction" and e["status"] == "running"
+    )
+    render_after = [e for i, e in enumerate(events) if i > corr_idx and e["stage"] == "rendering"]
+    assert render_after, "S2: no rendering event after correction"
+
+    # judging before ready (§2)
+    _assert_order(events, "reviewing", "judging", "S2")
+    _assert_order(events, "judging", "ready", "S2")
+
+    # Terminal is ready
+    terminal = [e for e in events if e["stage"] in {"ready", "didnt_pass"}]
+    assert any(e["stage"] == "ready" for e in terminal), (
+        "S2: terminal event should be 'ready' after correctable → re-render → pass"
+    )
+
+    _assert_clip_terminals(events, "S2")
+    _assert_replay(_SRC_S2, "S2")
+
+
+def assert_event_sequence_s3(ctx: HarnessContext) -> None:  # noqa: ARG001
+    """S3 loop-bound: ≥2 correction events, terminal = didnt_pass."""
+    events = _collect_events(_SRC_S3)
+    assert len(events) > 0, "S3: no events"
+
+    _assert_vocab_clean(events, "S3")
+
+    # Multiple correction events (2 corrections before loop bound)
+    corr_running = [e for e in events if e["stage"] == "correction" and e["status"] == "running"]
+    assert len(corr_running) >= 2, (
+        f"S3: expected ≥2 correction:running events, got {len(corr_running)}"
+    )
+
+    # judging emitted
+    assert any(e["stage"] == "judging" for e in events), "S3: judging event not emitted"
+
+    # Terminal is didnt_pass
+    terminal = [e for e in events if e["stage"] in {"ready", "didnt_pass"}]
+    assert any(e["stage"] == "didnt_pass" for e in terminal), (
+        f"S3: expected didnt_pass terminal; got {[e['stage'] for e in terminal]}"
+    )
+    assert not any(e["stage"] == "ready" for e in terminal), (
+        "S3: unexpected ready in loop-bound scenario"
+    )
+
+    _assert_clip_terminals(events, "S3")
+
+
+def assert_event_sequence_s4(ctx: HarnessContext) -> None:  # noqa: ARG001
+    """S4 safety terminal: no correction events, terminal = didnt_pass."""
+    events = _collect_events(_SRC_S4)
+    assert len(events) > 0, "S4: no events"
+
+    _assert_vocab_clean(events, "S4")
+
+    # No correction events (safety = immediately terminal, no correction attempts)
+    corr = [e for e in events if e["stage"] == "correction"]
+    assert not corr, (
+        f"S4: correction events emitted for safety-terminal clip: {corr}"
+    )
+
+    # judging emitted
+    assert any(e["stage"] == "judging" for e in events), "S4: judging event not emitted"
+
+    # Terminal is didnt_pass
+    terminal = [e for e in events if e["stage"] in {"ready", "didnt_pass"}]
+    assert any(e["stage"] == "didnt_pass" for e in terminal), (
+        "S4: expected didnt_pass terminal for safety failure"
+    )
+
+    _assert_clip_terminals(events, "S4")
+
+
+def assert_event_sequence_s5(ctx: HarnessContext) -> None:  # noqa: ARG001
+    """S5 malformed critic → ValidationError → escalated → didnt_pass."""
+    events = _collect_events(_SRC_S5)
+    assert len(events) > 0, "S5: no events"
+
+    _assert_vocab_clean(events, "S5")
+
+    # judging emitted
+    assert any(e["stage"] == "judging" for e in events), "S5: judging event not emitted"
+
+    # Terminal is didnt_pass (escalated)
+    terminal = [e for e in events if e["stage"] in {"ready", "didnt_pass"}]
+    assert any(e["stage"] == "didnt_pass" for e in terminal), (
+        "S5: expected didnt_pass terminal for ValidationError → escalated"
+    )
+
+    _assert_clip_terminals(events, "S5")
+
+
+def assert_event_sequence_s6(ctx: HarnessContext) -> None:  # noqa: ARG001
+    """S6 stage exception: failed status on identifying, no clip events."""
+    events = _collect_events(_SRC_S6)
+    assert len(events) > 0, "S6: no events"
+
+    _assert_vocab_clean(events, "S6")
+
+    # failed status emitted on the failing stage (identifying)
+    failed = [e for e in events if e["status"] == "failed"]
+    assert failed, "S6: no failed-status events"
+    assert any(e["stage"] == "identifying" for e in failed), (
+        f"S6: failed event not on 'identifying' stage: {[e['stage'] for e in failed]}"
+    )
+
+    # No clip-level events (exception before rendering)
+    clip_evs = [e for e in events if e["clip_id"] is not None]
+    assert not clip_evs, (
+        f"S6: unexpected clip events when exception happened before rendering: {clip_evs}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Fake render factory
 # ---------------------------------------------------------------------------
 
@@ -666,7 +975,11 @@ def run_scenario_1(ctx: HarnessContext, verbose: bool = False) -> None:
     )
     assert len(render_log) == 2, f"S1: render_log has {len(render_log)} entries"
 
+    # Event-sequence assertions (§5)
+    assert_event_sequence_s1(ctx)
+
     if verbose:
+        print(_event_coverage_str("S1 (Happy path)", _collect_events(_SRC_S1)))
         print(f"  S1: 2 clips approved, 2 renders, {len(judge_calls)} judge calls")
 
 
@@ -788,7 +1101,11 @@ def run_scenario_2(ctx: HarnessContext, verbose: bool = False) -> None:
         f"S2: critic_reports count={len(c.critic_reports or [])}, expected 2"
     )
 
+    # Event-sequence assertions (§5)
+    assert_event_sequence_s2(ctx)
+
     if verbose:
+        print(_event_coverage_str("S2 (Correction)", _collect_events(_SRC_S2)))
         print(f"  S2: clip end moved {30.0} → {c.end}, 2 renders, approved")
 
 
@@ -883,7 +1200,11 @@ def run_scenario_3(ctx: HarnessContext, verbose: bool = False) -> None:
         f"S3: judge reasons should mention loop bound: {c.judge_decision['reasons']}"
     )
 
+    # Event-sequence assertions (§5)
+    assert_event_sequence_s3(ctx)
+
     if verbose:
+        print(_event_coverage_str("S3 (Loop bound)", _collect_events(_SRC_S3)))
         print(f"  S3: 3 renders, 2 corrections, escalated (loop bound)")
 
 
@@ -968,7 +1289,11 @@ def run_scenario_4(ctx: HarnessContext, verbose: bool = False) -> None:
         f"S4: safety reasons should mention SAFETY: {c.judge_decision['reasons']}"
     )
 
+    # Event-sequence assertions (§5)
+    assert_event_sequence_s4(ctx)
+
     if verbose:
+        print(_event_coverage_str("S4 (Safety terminal)", _collect_events(_SRC_S4)))
         print(f"  S4: rejected immediately, 1 render, 0 corrections")
 
 
@@ -1041,7 +1366,11 @@ def run_scenario_5(ctx: HarnessContext, verbose: bool = False) -> None:
     assert len(render_log) == 1, f"S5: render_log={len(render_log)}, expected 1"
     assert len(judge_calls) == 1, f"S5: judge_calls={len(judge_calls)}, expected 1"
 
+    # Event-sequence assertions (§5)
+    assert_event_sequence_s5(ctx)
+
     if verbose:
+        print(_event_coverage_str("S5 (Malformed critic)", _collect_events(_SRC_S5)))
         print(f"  S5: ValidationError caught, clip escalated (not lost to rollback)")
 
 
@@ -1102,7 +1431,11 @@ def run_scenario_6(ctx: HarnessContext, verbose: bool = False) -> None:
         f"S6: render_log={len(render_log)}, expected 0 (failed before rendering)"
     )
 
+    # Event-sequence assertions (§5)
+    assert_event_sequence_s6(ctx)
+
     if verbose:
+        print(_event_coverage_str("S6 (Stage exception)", _collect_events(_SRC_S6)))
         print(f"  S6: stage exception → source.stage='failed', 0 clips stuck")
 
 
@@ -1324,8 +1657,25 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 72)
 
     ctx = setup_harness()
+    coverage_lines: list[str] = []
     try:
         results = run_all_scenarios(ctx, verbose=args.verbose)
+
+        # Collect event coverage BEFORE teardown (DB still live)
+        _SRC_MAP = [
+            ("Scenario 1 (Happy path)", _SRC_S1),
+            ("Scenario 2 (Correction)", _SRC_S2),
+            ("Scenario 3 (Loop bound)", _SRC_S3),
+            ("Scenario 4 (Safety terminal)", _SRC_S4),
+            ("Scenario 5 (Malformed critic)", _SRC_S5),
+            ("Scenario 6 (Stage exception)", _SRC_S6),
+        ]
+        for slabel, src_id in _SRC_MAP:
+            try:
+                evts = _collect_events(src_id)
+                coverage_lines.append(_event_coverage_str(slabel, evts))
+            except Exception:
+                pass
     finally:
         teardown_harness(ctx)
 
@@ -1345,6 +1695,13 @@ def main(argv: list[str] | None = None) -> int:
     print("-" * 72)
     pass_rate = n_pass / n_total * 100 if n_total else 0
     print(f"Pass rate: {n_pass}/{n_total} ({pass_rate:.0f}%)")
+
+    if coverage_lines:
+        print()
+        print("EVENT COVERAGE PER SCENARIO")
+        print("-" * 72)
+        for cl in coverage_lines:
+            print(cl)
 
     if n_fail > 0:
         print(f"\nFAIL: {n_fail} scenario(s) did not pass. Exit 1.")

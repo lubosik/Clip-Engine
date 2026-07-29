@@ -14,7 +14,7 @@ import logging
 import mimetypes
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -379,6 +379,7 @@ def download_source(
     url: str,
     raw: dict,
     campaign: str | None = None,
+    on_event: Callable[[str, str], None] | None = None,
 ) -> Path:
     """
     Download a source video to STORAGE_DIR/raw/.
@@ -389,6 +390,10 @@ def download_source(
         url:       canonical source URL
         raw:       original discovery item dict (may contain direct videoUrl)
         campaign:  optional campaign name for the Apify spend ledger
+        on_event:  optional callable(stage: str, detail: str) invoked at key
+                   download lifecycle points (chain start, fallback, done).
+                   Contract: MUST NOT raise; errors are the caller's concern.
+                   Campaign cron path passes None (unchanged behaviour).
 
     Returns:
         Path to the downloaded file.
@@ -398,9 +403,24 @@ def download_source(
     """
     dest = raw_path(source_id)  # will be adjusted for actual extension
 
+    def _fire(detail: str) -> None:
+        """Fire the on_event callback, never raising."""
+        if on_event is not None:
+            try:
+                on_event("downloading", detail)
+            except Exception as cb_exc:
+                log.debug("download_source on_event callback raised (ignored): %s", cb_exc)
+
     if platform == "youtube":
+        _fire(f"Starting yt-dlp download for {url}")
         try:
-            return _download_youtube(url, dest)
+            result = _download_youtube(url, dest)
+            try:
+                size_mb = round(result.stat().st_size / 1_048_576, 1) if result.exists() else 0
+                _fire(f"Download complete — {size_mb} MB")
+            except Exception:
+                _fire("Download complete")
+            return result
         except Exception as exc:
             if not _apify_downloader_available():
                 raise
@@ -409,7 +429,14 @@ def download_source(
                 str(exc)[:160],
                 extra={"url": url},
             )
-            return _download_youtube_via_apify(url, dest, campaign=campaign)
+            _fire("yt-dlp blocked — downloading via Apify")
+            result = _download_youtube_via_apify(url, dest, campaign=campaign)
+            try:
+                size_mb = round(result.stat().st_size / 1_048_576, 1) if result.exists() else 0
+                _fire(f"Apify download complete — {size_mb} MB")
+            except Exception:
+                _fire("Apify download complete")
+            return result
 
     elif platform == "tiktok":
         video_url = _get_tiktok_video_url(raw)

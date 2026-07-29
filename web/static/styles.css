@@ -3540,3 +3540,315 @@ details[open] .av-adv-chevron {
     animation: none;
   }
 }
+
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   PROGRESS EVENTS REVAMP (v3, 2026-07-29)
+   Per-source SSE panel: bar, chip rail, caption line, elapsed/stalled, terminal.
+   All new rules below; nothing above is touched.
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Bar transition: 500 ms ease-out per §4 (replaces 0.7 s spring) ─────────── */
+
+.source-stage-bar-fill {
+  transition: width 500ms ease-out;
+}
+
+/* ── Live caption line ────────────────────────────────────────────────────────
+   Shows latest event.detail verbatim, one line, truncated on overflow.
+   Appears below the bar on non-terminal stages. ─────────────────────────────── */
+
+.source-caption-line {
+  font-size: 11px;
+  color: var(--text-2);
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 4px;
+  letter-spacing: 0.01em;
+  opacity: 0.85;
+  animation: captionFadeIn 0.25s ease both;
+}
+
+@keyframes captionFadeIn {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 0.85; transform: translateY(0); }
+}
+
+/* ── Per-clip chip rail ───────────────────────────────────────────────────────
+   Appears at the `identified` stage when progress_total is known.
+   Chips wrap at 380 px; each chip is a compact numbered indicator.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+.source-chip-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+  /* Ensure wrapping at narrow widths down to 380 px */
+  max-width: 100%;
+}
+
+/* Base clip chip — extends .chip but smaller and numbered */
+.chip-clip {
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0 6px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  /* 44px minimum touch column — two chips side by side still ≥ 44 px row height
+     achieved by the gap and wrapping; individual chips at 28px are fine since
+     they are information display, not primary action targets. */
+  cursor: default;
+  white-space: nowrap;
+  line-height: 1;
+  border: 1px solid transparent;
+}
+
+/* Micro-state colours —————————————————————————————————————————————— */
+
+/* waiting: neutral glass */
+.chip-waiting {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: var(--text-3);
+}
+
+/* rendering: subtle pulse to show activity */
+.chip-rendering {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: var(--text-2);
+  animation: chipRenderPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes chipRenderPulse {
+  0%, 100% { border-color: rgba(255, 255, 255, 0.14); }
+  50%       { border-color: rgba(0, 229, 255, 0.28); }
+}
+
+/* reviewing: slightly brighter */
+.chip-reviewing {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--text-2);
+}
+
+/* correcting: amber, same as chip-amber but used on clip chips */
+.chip-correcting {
+  /* inherits .chip-amber colours; extra pulse */
+  animation: chipCorrectPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes chipCorrectPulse {
+  0%, 100% { box-shadow: none; }
+  50%       { box-shadow: 0 0 8px rgba(255, 180, 84, 0.35); }
+}
+
+/* ready: accent cyan — inherits .chip-accent */
+/* didnt_pass: amber — inherits .chip-amber */
+
+/* Correction glyph — tiny pencil SVG inside ready/didnt_pass chips */
+.chip-correction-glyph {
+  flex-shrink: 0;
+  opacity: 0.70;
+  vertical-align: middle;
+  /* Colour inherits from parent chip */
+  stroke: currentColor;
+}
+
+/* ── Tap-to-reveal wrapper for amber chips ────────────────────────────────────
+   Wraps a <details> around the chip so tapping it expands the reason.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+.chip-reveal-wrap {
+  position: relative;
+}
+
+/* The <summary> is the visible chip — remove default marker */
+.chip-reveal-wrap > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.chip-reveal-wrap > summary::-webkit-details-marker { display: none; }
+
+.chip-revealable {
+  /* Slightly different cursor to hint interactivity */
+  cursor: pointer;
+}
+
+.chip-reveal-reason {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 10;
+  min-width: 200px;
+  max-width: min(280px, calc(100vw - 32px));
+  padding: 8px 10px;
+  border-radius: var(--r-xs);
+  background: rgba(10, 10, 22, 0.97);
+  border: 1px solid var(--amber-border);
+  box-shadow:
+    0 4px 20px rgba(0, 0, 0, 0.65),
+    0 0 12px rgba(255, 180, 84, 0.12);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--amber);
+  word-break: break-word;
+  animation: reasonPop 0.18s var(--spring) both;
+}
+
+@keyframes reasonPop {
+  from { opacity: 0; transform: translateY(4px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)   scale(1); }
+}
+
+/* On mobile, anchor the popover to the left edge of the rail */
+@media (max-width: 420px) {
+  .chip-reveal-reason {
+    left: 0;
+    right: auto;
+  }
+}
+
+/* ── Stage elapsed + stalled indicator ───────────────────────────────────────
+   Small timestamp line below the chip rail or bar.
+   Stalled variant uses amber text + a blinking dot.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+.source-stage-elapsed {
+  font-size: 10px;
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.source-stage-elapsed--stalled {
+  color: var(--amber);
+  opacity: 0.85;
+}
+
+.source-stalled-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--amber);
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-border);
+}
+
+.source-stalled-badge::before {
+  content: '';
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--amber);
+  animation: stalledBlink 1.2s ease-in-out infinite;
+}
+
+@keyframes stalledBlink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.25; }
+}
+
+/* ── Terminal summary (complete state) ────────────────────────────────────────
+   Settles into a compact summary row with links to queue sections.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+.source-card--complete {
+  border-color: rgba(0, 229, 255, 0.18);
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.50),
+    0 0 16px rgba(0, 229, 255, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+.source-terminal-summary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.source-terminal-sep {
+  color: var(--text-3);
+}
+
+.source-terminal-link {
+  text-decoration: none;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  transition: background 0.15s;
+}
+
+.source-terminal-link--ready {
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+}
+.source-terminal-link--ready:hover {
+  background: rgba(0, 229, 255, 0.18);
+}
+
+.source-terminal-link--failed {
+  color: var(--amber);
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-border);
+}
+.source-terminal-link--failed:hover {
+  background: rgba(255, 180, 84, 0.20);
+}
+
+/* ── Reduced-motion overrides for all progress-events revamp additions ─────── */
+
+@media (prefers-reduced-motion: reduce) {
+  /* Bar: no transition */
+  .source-stage-bar-fill {
+    transition: none !important;
+  }
+
+  /* Caption fade: skip animation */
+  .source-caption-line {
+    animation: none;
+    opacity: 0.85;
+  }
+
+  /* Chip animations: suppress */
+  .chip-rendering,
+  .chip-correcting {
+    animation: none;
+  }
+
+  /* Reason popover: skip animation */
+  .chip-reveal-reason {
+    animation: none;
+  }
+
+  /* Stalled blink: show solid dot */
+  .source-stalled-badge::before {
+    animation: none;
+    opacity: 1;
+  }
+}

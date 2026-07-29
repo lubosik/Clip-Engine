@@ -37,6 +37,7 @@ Module-level external-effect references (monkeypatchable in tests/harness):
   _pipeline_render_and_record    → producer.render_dispatch.render_and_record
   _pipeline_run_critic           → producer.critic.run_critic
   _pipeline_rank_moments         → core.llm.rank_moments
+  _pipeline_emit_event           → producer.progress_events.emit_event
 """
 
 from __future__ import annotations
@@ -164,11 +165,17 @@ def _pipeline_probe_youtube(url: str) -> None:
 
 
 def _pipeline_download_source(
-    source_id: str, platform: str, url: str, raw: dict, campaign: str | None = None
+    source_id: str,
+    platform: str,
+    url: str,
+    raw: dict,
+    campaign: str | None = None,
+    on_event: Any = None,
 ) -> str:
     from producer.download import download_source
     return download_source(
-        source_id=source_id, platform=platform, url=url, raw=raw, campaign=campaign
+        source_id=source_id, platform=platform, url=url, raw=raw,
+        campaign=campaign, on_event=on_event,
     )
 
 
@@ -232,6 +239,31 @@ def _pipeline_rank_moments(
         ranking_cfg,
         preference_context=preference_context,
         sentence_spans=sentence_spans,
+    )
+
+
+def _pipeline_emit_event(
+    session: Any,
+    source_id: str,
+    stage: str,
+    *,
+    status: str = "running",
+    clip_id: int | None = None,
+    n: int | None = None,
+    total: int | None = None,
+    detail: str = "",
+    reason: str | None = None,
+) -> None:
+    """Module-level wrapper for producer.progress_events.emit_event.
+
+    Monkeypatchable by tests so emission points can be intercepted without
+    touching the real DB.  Never raises (emitter contract).
+    """
+    from producer.progress_events import emit_event
+    emit_event(
+        session, source_id, stage,
+        status=status, clip_id=clip_id, n=n, total=total,
+        detail=detail, reason=reason,
     )
 
 
@@ -363,6 +395,10 @@ def _run_clip_loop(
     session: Any,
     max_modal_spend: float | None,
     run_start: Any = None,
+    # Progress event support — passed through from run_video
+    _source_id: str = "",
+    _clip_idx: int = 0,
+    _total_clips: int = 1,
 ) -> None:
     """Run the critic→correct→re-render loop for a single clip.
 
@@ -573,13 +609,37 @@ def _run_clip_loop(
 
         # Stage 'correcting'
         from producer.run import set_source_stage
-        source_id = getattr(clip_row, "source_id", "")
+        source_id = getattr(clip_row, "source_id", "") or _source_id
         set_source_stage(session, source_id, "correcting")
 
         # New R2 output keys with _r{attempt+1} suffix
         new_attempt = attempt + 1
+
+        # Emit correction event (critic passed correctable failures, re-rendering)
+        correctable_reasons = [f.reason for f in correctable if f.reason]
+        _pipeline_emit_event(
+            session, source_id, "correction", status="running",
+            clip_id=clip_id,
+            detail=(
+                f"Clip {_clip_idx + 1}: applying correction (fix {new_attempt}/{MAX_CORRECTIONS})"
+                + (f" — {correctable_reasons[0]}" if correctable_reasons else "")
+            ),
+            reason="; ".join(correctable_reasons) if correctable_reasons else None,
+        )
+
         new_candidate = dict(current_candidate)
         new_candidate["attempt"] = new_attempt
+
+        # Emit rendering start for the correction re-render
+        _pipeline_emit_event(
+            session, source_id, "rendering", status="running",
+            clip_id=clip_id, n=_clip_idx + 1, total=_total_clips,
+            detail=(
+                f"Creating clip {_clip_idx + 1} of {_total_clips} — rendering on Modal "
+                f"(fix {new_attempt}/{MAX_CORRECTIONS})"
+            ),
+        )
+        session.commit()
 
         # Re-render: call render_and_record with the corrected candidate
         # and new output keys suffixed _r{new_attempt}
@@ -653,6 +713,16 @@ def _run_clip_loop(
 
         current_file_path = dispatch.file_path
         current_thumb_path = dispatch.thumb_path
+
+        # §2 fix: emit rendering:done for the correction re-render (per-render start/done)
+        _pipeline_emit_event(
+            session, source_id, "rendering", status="done",
+            clip_id=clip_id, n=_clip_idx + 1, total=_total_clips,
+            detail=(
+                f"Clip {_clip_idx + 1} of {_total_clips} rendered "
+                f"(fix {new_attempt}/{MAX_CORRECTIONS})"
+            ),
+        )
 
         # Update prior_failures for next critic run (zero-context: only the failures)
         prior_failures = list(report.failures)
@@ -793,6 +863,11 @@ def run_video(
         # Set stage to queued
         from producer.run import set_source_stage
         set_source_stage(session, source_id, "queued")
+        _pipeline_emit_event(
+            session, source_id, "queued", status="running",
+            detail="Source queued for processing",
+        )
+        session.commit()
 
     # ── Step 2: Transcribing ─────────────────────────────────────────────────
     try:
@@ -801,6 +876,11 @@ def run_video(
 
         with get_session() as session:
             set_source_stage(session, source_id, "transcribing")
+            _pipeline_emit_event(
+                session, source_id, "transcribing", status="running",
+                detail="Starting transcript fetch",
+            )
+            session.commit()
 
             # Spend guard: probe before LLM spend
             try:
@@ -811,6 +891,12 @@ def run_video(
                     source_id, probe_exc,
                 )
                 set_source_stage(session, source_id, "failed", error=str(probe_exc)[:500])
+                _pipeline_emit_event(
+                    session, source_id, "transcribing", status="failed",
+                    detail="YouTube probe failed",
+                    reason=str(probe_exc)[:500],
+                )
+                session.commit()
                 return VideoRunResult(
                     campaign=campaign_name,
                     source_id=source_id,
@@ -836,6 +922,12 @@ def run_video(
                     source_id, exc,
                 )
                 set_source_stage(session, source_id, "failed", error=str(exc)[:500])
+                _pipeline_emit_event(
+                    session, source_id, "transcribing", status="failed",
+                    detail="Transcript fetch failed (transient — retryable)",
+                    reason=str(exc)[:500],
+                )
+                session.commit()
                 return VideoRunResult(
                     campaign=campaign_name,
                     source_id=source_id,
@@ -855,6 +947,11 @@ def run_video(
             with get_session() as session:
                 mark_source_status(session, source_id, "done")
                 set_source_stage(session, source_id, "complete")
+                _pipeline_emit_event(
+                    session, source_id, "transcribing", status="done",
+                    detail="No transcript segments found — source marked complete",
+                )
+                session.commit()
             return VideoRunResult(
                 campaign=campaign_name,
                 source_id=source_id,
@@ -871,6 +968,7 @@ def run_video(
 
         # Punctuation/sentence cache (as in _process_source)
         sentence_spans: list[dict] | None = None
+        _transcript_was_cached: bool = False
         with get_session() as session:
             try:
                 from core.models import Transcript as _Tr
@@ -879,6 +977,7 @@ def run_video(
                 if tr_row is not None:
                     if tr_row.sentences is not None:
                         sentence_spans = tr_row.sentences
+                        _transcript_was_cached = True
                     else:
                         sentence_spans = _restore(segments)
                         if sentence_spans is not None:
@@ -886,6 +985,21 @@ def run_video(
                             session.commit()
             except Exception as span_exc:
                 log.warning("run_video: sentence spans failed (non-fatal): %s", span_exc)
+
+        # Emit transcribing done — distinguish cached vs freshly fetched.
+        with get_session() as session:
+            n_segs = len(segments)
+            if _transcript_was_cached:
+                _pipeline_emit_event(
+                    session, source_id, "transcribing", status="done",
+                    detail=f"Using cached transcript ({n_segs} segments)",
+                )
+            else:
+                _pipeline_emit_event(
+                    session, source_id, "transcribing", status="done",
+                    detail=f"Transcript fetched ({n_segs} segments)",
+                )
+            session.commit()
 
     except Exception as exc:
         log.error("run_video: stage 2 failed for %s: %s", source_id, exc, exc_info=True)
@@ -908,24 +1022,88 @@ def run_video(
 
     # ── Step 3: Identifying (rank_moments + deterministic guards) ────────────
     try:
+        from core.llm import RankingUnavailable
+
         with get_session() as session:
             set_source_stage(session, source_id, "identifying")
+            _pipeline_emit_event(
+                session, source_id, "identifying", status="running",
+                detail="Reading transcript / selecting moments",
+            )
+            session.commit()
 
-        max_clips = getattr(campaign_cfg.ranking, "max_clips_per_source", 8) or 8
         ranking_cfg = campaign_cfg.ranking
+
+        # §6 max_clips: scale with duration — min(30, max(cfg, duration_min // 4))
+        base_max_clips = getattr(ranking_cfg, "max_clips_per_source", 8) or 8
+        try:
+            # Use last transcript segment end time as video duration estimate
+            duration_secs = float(segments[-1]["end"]) if segments else 0.0
+            duration_min = duration_secs / 60.0
+            duration_based = int(duration_min // 4)
+            max_clips = min(30, max(base_max_clips, duration_based))
+            log.info(
+                "run_video: %s max_clips=%d (cfg=%d, duration_min=%.1f, duration_based=%d)",
+                source_id, max_clips, base_max_clips, duration_min, duration_based,
+            )
+        except Exception:
+            max_clips = base_max_clips
+
+        # Temporarily override max_clips_per_source on ranking_cfg for this call
+        # without mutating the original cfg object.  rank_clips reads the field
+        # directly from cfg, so we wrap it.
+        class _RankingCfgOverride:
+            """Thin wrapper that overrides max_clips_per_source."""
+            def __init__(self, inner: Any, max_clips_override: int) -> None:
+                self._inner = inner
+                self.max_clips_per_source = max_clips_override
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+        ranking_cfg_for_call = _RankingCfgOverride(ranking_cfg, max_clips)
 
         try:
             from core.preferences import build_preference_context
-            preference_context = build_preference_context(session, campaign_name)
+            with get_session() as _pref_session:
+                preference_context = build_preference_context(_pref_session, campaign_name)
         except Exception:
             preference_context = ""
 
-        raw_candidates = _pipeline_rank_moments(
-            segments,
-            ranking_cfg,
-            sentence_spans=sentence_spans,
-            preference_context=preference_context,
-        )
+        try:
+            raw_candidates = _pipeline_rank_moments(
+                segments,
+                ranking_cfg_for_call,
+                sentence_spans=sentence_spans,
+                preference_context=preference_context,
+            )
+        except RankingUnavailable as ru_exc:
+            # Mirror TranscriptFetchError semantics: stage failed, source UNTOUCHED
+            log.warning(
+                "run_video: RankingUnavailable for %s: %s — NOT marking done",
+                source_id, ru_exc,
+            )
+            with get_session() as session:
+                set_source_stage(session, source_id, "failed", error=str(ru_exc)[:500])
+                _pipeline_emit_event(
+                    session, source_id, "identifying", status="failed",
+                    detail="LLM ranking unavailable (retryable)",
+                    reason=str(ru_exc)[:500],
+                )
+                session.commit()
+            return VideoRunResult(
+                campaign=campaign_name,
+                source_id=source_id,
+                clips_identified=0,
+                clips_rendered=0,
+                clips_approved=0,
+                clips_rejected=0,
+                clips_escalated=0,
+                total_corrections=0,
+                apify_spend_usd=getattr(apify, "total_cost_usd", 0.0),
+                modal_spend_usd=0.0,
+                status="failed",
+                error=f"RankingUnavailable: {ru_exc}",
+            )
 
         log.info(
             "run_video: %s rank_moments returned %d candidates",
@@ -983,10 +1161,35 @@ def run_video(
             "run_video: %s clips identified after guards: %d", source_id, clips_identified
         )
 
+        # Emit per-candidate identified events, then the identified summary.
+        with get_session() as session:
+            for idx, cand in enumerate(selected):
+                _pipeline_emit_event(
+                    session, source_id, "identified", status="running",
+                    n=idx + 1, total=clips_identified,
+                    detail=(
+                        f"Candidate {idx + 1}/{clips_identified} "
+                        f"[{cand.get('start', 0):.1f}s–{cand.get('end', 0):.1f}s] "
+                        f"score={cand.get('score', 0):.2f}"
+                    ),
+                )
+            # Summary identified event
+            _pipeline_emit_event(
+                session, source_id, "identified", status="done",
+                total=clips_identified,
+                detail=f"Found {clips_identified} clip{'s' if clips_identified != 1 else ''}",
+            )
+            session.commit()
+
         if not selected:
             with get_session() as session:
                 mark_source_status(session, source_id, "done")
                 set_source_stage(session, source_id, "complete")
+                _pipeline_emit_event(
+                    session, source_id, "complete", status="done",
+                    detail="0 clips identified — source exhausted",
+                )
+                session.commit()
             return VideoRunResult(
                 campaign=campaign_name,
                 source_id=source_id,
@@ -1025,11 +1228,21 @@ def run_video(
                 session, source_id, "rendering",
                 clips_identified=clips_identified,
             )
+            session.commit()
 
+    except RankingUnavailable:
+        # Already handled above — re-raise would bypass the error return, so just pass.
+        raise  # pragma: no cover — the inner except already returns
     except Exception as exc:
         log.error("run_video: stage 3/4 failed for %s: %s", source_id, exc, exc_info=True)
         with get_session() as session:
             set_source_stage(session, source_id, "failed", error=str(exc)[:500])
+            _pipeline_emit_event(
+                session, source_id, "identifying", status="failed",
+                detail="Identification stage error",
+                reason=str(exc)[:500],
+            )
+            session.commit()
         return VideoRunResult(
             campaign=campaign_name,
             source_id=source_id,
@@ -1046,9 +1259,31 @@ def run_video(
         )
 
     # ── Step 5: Download + render all clips ──────────────────────────────────
+
+    # Emit downloading start and wire up on_event callback for yt-dlp/Apify events.
+    with get_session() as _dl_session_start:
+        _pipeline_emit_event(
+            _dl_session_start, source_id, "downloading", status="running",
+            detail="Starting video download",
+        )
+        _dl_session_start.commit()
+
+    def _download_on_event(stage: str, detail: str) -> None:
+        """Forward download lifecycle events to the pipeline_events table."""
+        try:
+            with get_session() as _ev_session:
+                _pipeline_emit_event(
+                    _ev_session, source_id, "downloading", status="running",
+                    detail=detail,
+                )
+                _ev_session.commit()
+        except Exception as _ev_exc:
+            log.debug("_download_on_event failed (ignored): %s", _ev_exc)
+
     try:
         source_video_path = _pipeline_download_source(
-            source_id, "youtube", url, {}, campaign=campaign_name
+            source_id, "youtube", url, {}, campaign=campaign_name,
+            on_event=_download_on_event,
         )
     except Exception as dl_exc:
         log.error("run_video: download failed for %s: %s", source_id, dl_exc)
@@ -1056,6 +1291,12 @@ def run_video(
             set_source_stage(
                 session, source_id, "failed", error=str(dl_exc)[:500]
             )
+            _pipeline_emit_event(
+                session, source_id, "downloading", status="failed",
+                detail="Download failed",
+                reason=str(dl_exc)[:500],
+            )
+            session.commit()
         return VideoRunResult(
             campaign=campaign_name,
             source_id=source_id,
@@ -1071,6 +1312,15 @@ def run_video(
             error=f"Download failed: {dl_exc}",
         )
 
+    # Emit downloading done event (the on_event callback already emits intermediate
+    # steps; this is the final confirmation after the file is on disk).
+    with get_session() as _dl_session_done:
+        _pipeline_emit_event(
+            _dl_session_done, source_id, "downloading", status="done",
+            detail="Video download complete",
+        )
+        _dl_session_done.commit()
+
     wdir = work_dir(source_id)
     inserted_clips: list[Any] = []
     new_ranges: list[list[float]] = []
@@ -1081,9 +1331,18 @@ def run_video(
         tr_row = session.query(_Tr2).filter_by(source_id=source_id).first()
         transcript_segments = tr_row.segments if tr_row else segments
 
-    for candidate in selected:
+    total_clips = len(selected)
+    for clip_idx, candidate in enumerate(selected):
         with get_session() as session:
             try:
+                # Emit rendering start for this clip (clip_id unknown yet — use None)
+                _pipeline_emit_event(
+                    session, source_id, "rendering", status="running",
+                    n=clip_idx + 1, total=total_clips,
+                    detail=f"Creating clip {clip_idx + 1} of {total_clips} — rendering on Modal",
+                )
+                session.commit()
+
                 dispatch = _pipeline_render_and_record(
                     campaign_cfg,
                     source_meta,
@@ -1130,6 +1389,13 @@ def run_video(
                     session.add(clip_row)
                     session.flush()
 
+                    _pipeline_emit_event(
+                        session, source_id, "rendering", status="failed",
+                        clip_id=clip_row.id, n=clip_idx + 1, total=total_clips,
+                        detail=f"Render failed for clip {clip_idx + 1} of {total_clips}",
+                        reason=str(dispatch.error)[:300] if dispatch.error else None,
+                    )
+
                     synthetic = CriticReport(
                         clip_id=clip_row.id,
                         attempt=0,
@@ -1147,6 +1413,15 @@ def run_video(
                     )
                     decision = judge(synthetic, 0, MAX_CORRECTIONS)
                     apply_judge_to_clip(clip_row, decision, session)
+
+                    # Terminal event: judging → didnt_pass or ready
+                    terminal_stage = "didnt_pass" if decision.decision != "approved" else "ready"
+                    _pipeline_emit_event(
+                        session, source_id, terminal_stage, status="done",
+                        clip_id=clip_row.id,
+                        detail=f"Clip {clip_idx + 1}: {decision.decision}",
+                        reason=("; ".join(decision.reasons) if decision.reasons else None),
+                    )
                     session.commit()
                     inserted_clips.append(clip_row)
                     continue
@@ -1184,10 +1459,25 @@ def run_video(
                 session.add(clip_row)
                 session.flush()  # get clip_row.id
 
+                # Emit rendering done for this clip now that we have clip_id
+                _pipeline_emit_event(
+                    session, source_id, "rendering", status="done",
+                    clip_id=clip_row.id, n=clip_idx + 1, total=total_clips,
+                    detail=f"Clip {clip_idx + 1} of {total_clips} rendered",
+                )
+
                 log.info(
                     "run_video: initial render OK clip_id=%s start=%.2f end=%.2f",
                     clip_row.id, candidate.get("start", 0), candidate.get("end", 0),
                 )
+
+                # Emit reviewing start
+                _pipeline_emit_event(
+                    session, source_id, "reviewing", status="running",
+                    clip_id=clip_row.id,
+                    detail=f"Reviewing clip {clip_idx + 1}",
+                )
+                session.commit()
 
                 # ── Per-clip critic/judge loop ────────────────────────────────
                 _run_clip_loop(
@@ -1205,7 +1495,36 @@ def run_video(
                     session=session,
                     max_modal_spend=max_modal_spend,
                     run_start=run_start,
+                    _source_id=source_id,
+                    _clip_idx=clip_idx,
+                    _total_clips=total_clips,
                 )
+
+                # Emit terminal event based on judge decision
+                judge_dec = getattr(clip_row, "judge_decision", None)
+                if judge_dec:
+                    dec_name = (judge_dec or {}).get("decision", "")
+                    terminal_stage = "ready" if dec_name == "approved" else "didnt_pass"
+                    correction_atts = getattr(clip_row, "correction_attempts", 0) or 0
+                    if correction_atts > 0:
+                        # Also emit corrected event to record that correction happened
+                        _pipeline_emit_event(
+                            session, source_id, "correction", status="corrected",
+                            clip_id=clip_row.id,
+                            detail=f"Clip {clip_idx + 1}: {correction_atts} correction(s) applied",
+                        )
+                    # §2 fix: emit judging stage before terminal (judging → ready/didnt_pass)
+                    _pipeline_emit_event(
+                        session, source_id, "judging", status="running",
+                        clip_id=clip_row.id,
+                        detail=f"Clip {clip_idx + 1}: judging quality",
+                    )
+                    _pipeline_emit_event(
+                        session, source_id, terminal_stage, status="done",
+                        clip_id=clip_row.id,
+                        detail=f"Clip {clip_idx + 1}: {dec_name or terminal_stage}",
+                        reason=("; ".join((judge_dec or {}).get("reasons", [])) or None),
+                    )
 
                 new_ranges.append([candidate["start"], candidate["end"]])
                 inserted_clips.append(clip_row)
@@ -1217,6 +1536,17 @@ def run_video(
                     candidate.get("start", 0), candidate.get("end", 0), clip_exc,
                     exc_info=True,
                 )
+                try:
+                    # Best-effort: emit a failed event so the UI doesn't hang
+                    _pipeline_emit_event(
+                        session, source_id, "rendering", status="failed",
+                        n=clip_idx + 1, total=total_clips,
+                        detail=f"Clip {clip_idx + 1} processing error",
+                        reason=str(clip_exc)[:300],
+                    )
+                    session.commit()
+                except Exception:
+                    pass
                 try:
                     session.rollback()
                 except Exception:
@@ -1231,8 +1561,31 @@ def run_video(
 
             if inserted_clips:
                 set_source_stage(session, source_id, "reviewing")
+                # Emit reviewing stage at source level (all clips submitted)
+                _pipeline_emit_event(
+                    session, source_id, "reviewing", status="running",
+                    detail="All clips rendered — awaiting human review",
+                )
             else:
                 set_source_stage(session, source_id, "complete")
+
+            # Compute terminal summary for complete event
+            n_ready = sum(
+                1 for c in inserted_clips
+                if (getattr(c, "judge_decision", None) or {}).get("decision") == "approved"
+            )
+            n_didnt_pass = sum(
+                1 for c in inserted_clips
+                if (getattr(c, "judge_decision", None) or {}).get("decision") != "approved"
+                and getattr(c, "judge_decision", None) is not None
+            )
+            _pipeline_emit_event(
+                session, source_id, "complete", status="done",
+                detail=(
+                    f"{n_ready} ready · {n_didnt_pass} didn't pass · source exhausted"
+                ),
+            )
+            session.commit()
     except Exception as fin_exc:
         log.error("run_video: finalization failed for %s: %s", source_id, fin_exc)
 

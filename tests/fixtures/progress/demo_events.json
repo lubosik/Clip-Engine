@@ -1,0 +1,470 @@
+{
+  "meta": {
+    "description": "Demo replay fixture: 4-clip run, one correction (clip 2), one didnt_pass (clip 3). ~40 events covering the full §2 stage vocabulary.",
+    "total_events": 39,
+    "source_id": "youtube:DEMO001AAAA",
+    "campaign": "demo",
+    "clip_ids": [1, 2, 3, 4],
+    "pacing_note": "t_offset_s is seconds from run start; scale by SPEED_FACTOR for demo pacing"
+  },
+  "source": {
+    "source_id": "youtube:DEMO001AAAA",
+    "campaign": "demo",
+    "platform": "youtube",
+    "url": "https://www.youtube.com/watch?v=DEMO001AAAA",
+    "title": "The Science of Elite Performance | Full Masterclass",
+    "author_handle": "@performancescience",
+    "status": "pending",
+    "stage": "queued"
+  },
+  "clips": [
+    {
+      "id": 1,
+      "source_id": "youtube:DEMO001AAAA",
+      "campaign": "demo",
+      "start": 45.2,
+      "end": 92.0,
+      "hook": "Your body only adapts when it's uncomfortable — that's the whole mechanism",
+      "score": 0.91,
+      "gate_status": "pending",
+      "status": "pending_review",
+      "kind": "clip",
+      "mode": "demo",
+      "aspect": "9:16"
+    },
+    {
+      "id": 2,
+      "source_id": "youtube:DEMO001AAAA",
+      "campaign": "demo",
+      "start": 145.8,
+      "end": 198.4,
+      "hook": "Most people train hard but sleep soft — and wonder why they plateau",
+      "score": 0.88,
+      "gate_status": "pending",
+      "status": "pending_review",
+      "kind": "clip",
+      "mode": "demo",
+      "aspect": "9:16"
+    },
+    {
+      "id": 3,
+      "source_id": "youtube:DEMO001AAAA",
+      "campaign": "demo",
+      "start": 312.1,
+      "end": 368.7,
+      "hook": "This specific supplement protocol cuts recovery time in half — clinically proven",
+      "score": 0.79,
+      "gate_status": "pending",
+      "status": "pending_review",
+      "kind": "clip",
+      "mode": "demo",
+      "aspect": "9:16"
+    },
+    {
+      "id": 4,
+      "source_id": "youtube:DEMO001AAAA",
+      "campaign": "demo",
+      "start": 445.0,
+      "end": 501.3,
+      "hook": "Zone 2 cardio isn't about burning calories — it's about building your engine",
+      "score": 0.74,
+      "gate_status": "pending",
+      "status": "pending_review",
+      "kind": "clip",
+      "mode": "demo",
+      "aspect": "9:16"
+    }
+  ],
+  "events": [
+    {
+      "t_offset_s": 0,
+      "stage": "queued",
+      "status": "running",
+      "clip_id": null,
+      "n": null,
+      "total": null,
+      "detail": "Source queued for processing",
+      "reason": null
+    },
+    {
+      "t_offset_s": 2,
+      "stage": "transcribing",
+      "status": "running",
+      "clip_id": null,
+      "n": null,
+      "total": null,
+      "detail": "Starting transcript fetch",
+      "reason": null
+    },
+    {
+      "t_offset_s": 18,
+      "stage": "transcribing",
+      "status": "done",
+      "clip_id": null,
+      "n": null,
+      "total": null,
+      "detail": "Transcript fetched (245 segments)",
+      "reason": null
+    },
+    {
+      "t_offset_s": 18,
+      "stage": "identifying",
+      "status": "running",
+      "clip_id": null,
+      "n": null,
+      "total": null,
+      "detail": "Reading transcript / selecting moments",
+      "reason": null
+    },
+    {
+      "t_offset_s": 22,
+      "stage": "identified",
+      "status": "running",
+      "clip_id": null,
+      "n": 1,
+      "total": 4,
+      "detail": "Candidate 1/4 [45.2s–92.0s] score=0.91",
+      "reason": null
+    },
+    {
+      "t_offset_s": 22,
+      "stage": "identified",
+      "status": "running",
+      "clip_id": null,
+      "n": 2,
+      "total": 4,
+      "detail": "Candidate 2/4 [145.8s–198.4s] score=0.88",
+      "reason": null
+    },
+    {
+      "t_offset_s": 22,
+      "stage": "identified",
+      "status": "running",
+      "clip_id": null,
+      "n": 3,
+      "total": 4,
+      "detail": "Candidate 3/4 [312.1s–368.7s] score=0.79",
+      "reason": null
+    },
+    {
+      "t_offset_s": 22,
+      "stage": "identified",
+      "status": "running",
+      "clip_id": null,
+      "n": 4,
+      "total": 4,
+      "detail": "Candidate 4/4 [445.0s–501.3s] score=0.74",
+      "reason": null
+    },
+    {
+      "t_offset_s": 22,
+      "stage": "identified",
+      "status": "done",
+      "clip_id": null,
+      "n": null,
+      "total": 4,
+      "detail": "Found 4 clips",
+      "reason": null
+    },
+    {
+      "t_offset_s": 22,
+      "stage": "downloading",
+      "status": "running",
+      "clip_id": null,
+      "n": null,
+      "total": null,
+      "detail": "Starting video download",
+      "reason": null
+    },
+    {
+      "t_offset_s": 24,
+      "stage": "downloading",
+      "status": "running",
+      "clip_id": null,
+      "n": null,
+      "total": null,
+      "detail": "yt-dlp blocked — downloading via Apify",
+      "reason": null
+    },
+    {
+      "t_offset_s": 26,
+      "stage": "downloading",
+      "status": "running",
+      "clip_id": null,
+      "n": null,
+      "total": null,
+      "detail": "Apify downloader started — waiting for result",
+      "reason": null
+    },
+    {
+      "t_offset_s": 58,
+      "stage": "downloading",
+      "status": "done",
+      "clip_id": null,
+      "n": null,
+      "total": null,
+      "detail": "Video download complete (847 MB)",
+      "reason": null
+    },
+    {
+      "t_offset_s": 58,
+      "stage": "rendering",
+      "status": "running",
+      "clip_id": null,
+      "n": 1,
+      "total": 4,
+      "detail": "Creating clip 1 of 4 — rendering on Modal",
+      "reason": null
+    },
+    {
+      "t_offset_s": 75,
+      "stage": "rendering",
+      "status": "done",
+      "clip_id": 1,
+      "n": 1,
+      "total": 4,
+      "detail": "Clip 1 of 4 rendered",
+      "reason": null
+    },
+    {
+      "t_offset_s": 75,
+      "stage": "reviewing",
+      "status": "running",
+      "clip_id": 1,
+      "n": null,
+      "total": null,
+      "detail": "Reviewing clip 1",
+      "reason": null
+    },
+    {
+      "t_offset_s": 76,
+      "stage": "judging",
+      "status": "running",
+      "clip_id": 1,
+      "n": null,
+      "total": null,
+      "detail": "Clip 1: judging quality",
+      "reason": null
+    },
+    {
+      "t_offset_s": 76,
+      "stage": "ready",
+      "status": "done",
+      "clip_id": 1,
+      "n": null,
+      "total": null,
+      "detail": "Clip 1: approved",
+      "reason": null
+    },
+    {
+      "t_offset_s": 76,
+      "stage": "rendering",
+      "status": "running",
+      "clip_id": null,
+      "n": 2,
+      "total": 4,
+      "detail": "Creating clip 2 of 4 — rendering on Modal",
+      "reason": null
+    },
+    {
+      "t_offset_s": 93,
+      "stage": "rendering",
+      "status": "done",
+      "clip_id": 2,
+      "n": 2,
+      "total": 4,
+      "detail": "Clip 2 of 4 rendered",
+      "reason": null
+    },
+    {
+      "t_offset_s": 93,
+      "stage": "reviewing",
+      "status": "running",
+      "clip_id": 2,
+      "n": null,
+      "total": null,
+      "detail": "Reviewing clip 2",
+      "reason": null
+    },
+    {
+      "t_offset_s": 94,
+      "stage": "correction",
+      "status": "running",
+      "clip_id": 2,
+      "n": null,
+      "total": null,
+      "detail": "Clip 2: applying correction (fix 1/2) — Clip ends abruptly mid-sentence",
+      "reason": "Clip ends abruptly mid-sentence"
+    },
+    {
+      "t_offset_s": 94,
+      "stage": "rendering",
+      "status": "running",
+      "clip_id": 2,
+      "n": 2,
+      "total": 4,
+      "detail": "Creating clip 2 of 4 — rendering on Modal (fix 1/2)",
+      "reason": null
+    },
+    {
+      "t_offset_s": 108,
+      "stage": "rendering",
+      "status": "done",
+      "clip_id": 2,
+      "n": 2,
+      "total": 4,
+      "detail": "Clip 2 of 4 rendered (fix 1/2)",
+      "reason": null
+    },
+    {
+      "t_offset_s": 108,
+      "stage": "correction",
+      "status": "corrected",
+      "clip_id": 2,
+      "n": null,
+      "total": null,
+      "detail": "Clip 2: 1 correction(s) applied",
+      "reason": null
+    },
+    {
+      "t_offset_s": 108,
+      "stage": "judging",
+      "status": "running",
+      "clip_id": 2,
+      "n": null,
+      "total": null,
+      "detail": "Clip 2: judging quality",
+      "reason": null
+    },
+    {
+      "t_offset_s": 108,
+      "stage": "ready",
+      "status": "done",
+      "clip_id": 2,
+      "n": null,
+      "total": null,
+      "detail": "Clip 2: approved",
+      "reason": null
+    },
+    {
+      "t_offset_s": 109,
+      "stage": "rendering",
+      "status": "running",
+      "clip_id": null,
+      "n": 3,
+      "total": 4,
+      "detail": "Creating clip 3 of 4 — rendering on Modal",
+      "reason": null
+    },
+    {
+      "t_offset_s": 126,
+      "stage": "rendering",
+      "status": "done",
+      "clip_id": 3,
+      "n": 3,
+      "total": 4,
+      "detail": "Clip 3 of 4 rendered",
+      "reason": null
+    },
+    {
+      "t_offset_s": 126,
+      "stage": "reviewing",
+      "status": "running",
+      "clip_id": 3,
+      "n": null,
+      "total": null,
+      "detail": "Reviewing clip 3",
+      "reason": null
+    },
+    {
+      "t_offset_s": 127,
+      "stage": "judging",
+      "status": "running",
+      "clip_id": 3,
+      "n": null,
+      "total": null,
+      "detail": "Clip 3: judging quality",
+      "reason": null
+    },
+    {
+      "t_offset_s": 127,
+      "stage": "didnt_pass",
+      "status": "done",
+      "clip_id": 3,
+      "n": null,
+      "total": null,
+      "detail": "Clip 3: rejected",
+      "reason": "SAFETY: Unqualified medical claims about supplement dosages"
+    },
+    {
+      "t_offset_s": 128,
+      "stage": "rendering",
+      "status": "running",
+      "clip_id": null,
+      "n": 4,
+      "total": 4,
+      "detail": "Creating clip 4 of 4 — rendering on Modal",
+      "reason": null
+    },
+    {
+      "t_offset_s": 145,
+      "stage": "rendering",
+      "status": "done",
+      "clip_id": 4,
+      "n": 4,
+      "total": 4,
+      "detail": "Clip 4 of 4 rendered",
+      "reason": null
+    },
+    {
+      "t_offset_s": 145,
+      "stage": "reviewing",
+      "status": "running",
+      "clip_id": 4,
+      "n": null,
+      "total": null,
+      "detail": "Reviewing clip 4",
+      "reason": null
+    },
+    {
+      "t_offset_s": 146,
+      "stage": "judging",
+      "status": "running",
+      "clip_id": 4,
+      "n": null,
+      "total": null,
+      "detail": "Clip 4: judging quality",
+      "reason": null
+    },
+    {
+      "t_offset_s": 146,
+      "stage": "ready",
+      "status": "done",
+      "clip_id": 4,
+      "n": null,
+      "total": null,
+      "detail": "Clip 4: approved",
+      "reason": null
+    },
+    {
+      "t_offset_s": 147,
+      "stage": "reviewing",
+      "status": "running",
+      "clip_id": null,
+      "n": null,
+      "total": null,
+      "detail": "All clips rendered — awaiting human review",
+      "reason": null
+    },
+    {
+      "t_offset_s": 147,
+      "stage": "complete",
+      "status": "done",
+      "clip_id": null,
+      "n": null,
+      "total": null,
+      "detail": "3 ready · 1 didn’t pass · source exhausted",
+      "reason": null
+    }
+  ]
+}

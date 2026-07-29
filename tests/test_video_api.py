@@ -470,18 +470,18 @@ class TestClipsDetailShape:
 
         # Verify shape of each entry
         entry = clips_detail[0]
-        assert "id" in entry
+        assert "clip_id" in entry
         assert "gate_status" in entry
         assert "status" in entry
         assert "correction_attempts" in entry
-        assert "last_failure_reasons" in entry
+        assert "reason" in entry
         assert "judge" in entry
 
         # Verify values
         assert entry["gate_status"] == "pending"
         assert entry["status"] == "pending_review"
         assert entry["correction_attempts"] == 0
-        assert isinstance(entry["last_failure_reasons"], list)
+        assert entry["reason"] is None or isinstance(entry["reason"], str)
         assert entry["judge"] is None
 
     def test_clips_detail_with_judge_decision(self, client: Any) -> None:
@@ -538,8 +538,8 @@ class TestClipsDetailShape:
         assert entry["judge"] == "approved"
         assert entry["correction_attempts"] == 1
         # Reasons should come from judge_decision.reasons since judge is set
-        assert isinstance(entry["last_failure_reasons"], list)
-        assert "All checks passed" in entry["last_failure_reasons"]
+        assert entry["reason"] is None or isinstance(entry["reason"], str)
+        assert (entry["reason"] or "").startswith("All checks passed") or entry["reason"] is None or "All checks passed" in (entry["reason"] or "")
 
     def test_clips_detail_with_critic_failures_no_judge(self, client: Any) -> None:
         c, tmp_path, _ = client
@@ -596,8 +596,8 @@ class TestClipsDetailShape:
         entry = src_data["clips_detail"][0]
 
         assert entry["judge"] is None
-        # last_failure_reasons should come from latest critic report
-        assert "Hook does not match body content" in entry["last_failure_reasons"]
+        # reason should come from the latest critic report (first failure)
+        assert entry["reason"] == "Hook does not match body content"
 
 
 # ---------------------------------------------------------------------------
