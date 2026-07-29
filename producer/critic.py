@@ -423,15 +423,28 @@ Return ONLY this JSON (no prose, no code fences):
 
     from core.llm import create_completion, extract_text
     from producer.review_gate import _parse_json_object
-    try:
-        message = create_completion(
-            client, model, 512, [{"role": "user", "content": prompt}]
-        )
-        raw = extract_text(message)
-        log.debug("Critic content LLM raw response (len=%d): %s", len(raw), raw[:300])
-        return _parse_json_object(raw)
-    except Exception as exc:
-        raise CriticUnavailable(f"Content LLM transport error: {exc}") from exc
+
+    # 512 tokens truncated the critic's extended verdict JSON mid-object on
+    # every real clip (2026-07-29 first live run) — the correction fields make
+    # this payload much larger than the original gate verdict. 2000 gives
+    # ample headroom; one retry covers transient malformed output.
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            message = create_completion(
+                client, model, 2000, [{"role": "user", "content": prompt}]
+            )
+            raw = extract_text(message)
+            log.debug(
+                "Critic content LLM raw response (len=%d): %s", len(raw), raw[:300]
+            )
+            return _parse_json_object(raw)
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "Critic content LLM attempt %d failed: %s", attempt + 1, exc
+            )
+    raise CriticUnavailable(f"Content LLM transport error: {last_exc}") from last_exc
 
 
 # ---------------------------------------------------------------------------

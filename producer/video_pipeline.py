@@ -106,6 +106,33 @@ def _validate_youtube_url(url: str) -> str:
 # Module-level external-effect references (monkeypatched by tests/harness)
 # ---------------------------------------------------------------------------
 
+def run_modal_spend(session: Any, campaign: str, since: Any) -> float:
+    """Sum of Modal render costs recorded for `campaign` since `since` (UTC).
+
+    Per-RUN spend for the --max-modal-spend guard — NOT month-to-date, which
+    conflates this run with the whole ledger (2026-07-29 bug: guard compared
+    MTD to the per-run cap, so corrections would be refused forever once the
+    month passed the cap).
+    """
+    try:
+        from sqlalchemy import func
+
+        from core.models import RenderJob
+
+        total = (
+            session.query(func.coalesce(func.sum(RenderJob.cost_estimate), 0.0))
+            .filter(
+                RenderJob.campaign == campaign,
+                RenderJob.backend == "modal",
+                RenderJob.created_at >= since,
+            )
+            .scalar()
+        )
+        return float(total or 0.0)
+    except Exception:
+        return 0.0
+
+
 def _pipeline_upsert_source(session: Any, candidate: dict, campaign_name: str) -> Any:
     from producer.dedupe import upsert_source
     return upsert_source(session, candidate, campaign_name)
@@ -335,6 +362,7 @@ def _run_clip_loop(
     run_mode: str,
     session: Any,
     max_modal_spend: float | None,
+    run_start: Any = None,
 ) -> None:
     """Run the critic→correct→re-render loop for a single clip.
 
@@ -376,14 +404,17 @@ def _run_clip_loop(
             try:
                 from producer.render_dispatch import estimate_modal_batch_cost
                 correction_cost = estimate_modal_batch_cost(1, session)
-                from producer.render_dispatch import month_to_date_modal_spend
-                mtd = month_to_date_modal_spend(session)
-                if mtd + correction_cost > max_modal_spend:
+                campaign_name = getattr(clip_row, "campaign", "") or ""
+                spent = (
+                    run_modal_spend(session, campaign_name, run_start)
+                    if run_start is not None else 0.0
+                )
+                if spent + correction_cost > max_modal_spend:
                     log.warning(
                         "_run_clip_loop: spend guard hit before correction re-render "
-                        "clip_id=%s attempt=%d mtd=%.4f correction_cost=%.4f max=%.2f "
-                        "-> escalating",
-                        clip_id, attempt, mtd, correction_cost, max_modal_spend,
+                        "clip_id=%s attempt=%d run_spend=%.4f correction_cost=%.4f "
+                        "max=%.2f -> escalating",
+                        clip_id, attempt, spent, correction_cost, max_modal_spend,
                     )
                     # Force judge(escalate) via a synthetic terminal failure
                     synthetic_report = CriticReport(
@@ -1173,6 +1204,7 @@ def run_video(
                     run_mode=run_mode,
                     session=session,
                     max_modal_spend=max_modal_spend,
+                    run_start=run_start,
                 )
 
                 new_ranges.append([candidate["start"], candidate["end"]])
@@ -1232,10 +1264,9 @@ def run_video(
         for c in inserted_clips
     )
 
-    from producer.render_dispatch import month_to_date_modal_spend
     try:
         with get_session() as session:
-            modal_spend = month_to_date_modal_spend(session)
+            modal_spend = run_modal_spend(session, campaign_name, run_start)
     except Exception:
         modal_spend = 0.0
 
