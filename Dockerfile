@@ -28,7 +28,16 @@ RUN curl -fsSL -o /usr/local/bin/supercronic \
         "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-amd64" \
     && chmod +x /usr/local/bin/supercronic
 
-RUN pip install --no-cache-dir yt-dlp
+# bgutil-ytdlp-pot-provider = PO-token plugin for datacenter-IP bot-walls
+# (server side runs as the Railway sidecar service `bgutil-pot`; wired via
+# BGUTIL_POT_URL). Do NOT add yt-dlp-get-pot — it conflicts with the native
+# pot framework in current yt-dlp (verified 2026-07-29).
+RUN pip install --no-cache-dir yt-dlp "bgutil-ytdlp-pot-provider==1.3.1"
+
+# Deno = yt-dlp's recommended JS runtime for YouTube player challenges
+# (current yt-dlp lists all JS challenge providers unavailable without one).
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- --yes \
+    && deno --version
 
 WORKDIR /app
 

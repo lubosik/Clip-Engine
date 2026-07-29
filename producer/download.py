@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import os
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,34 @@ _YTDLP_CLIENT_CHAIN: list[list[str] | None] = [
 ]
 
 
+def _pot_provider_url() -> str | None:
+    """URL of the bgutil PO-token provider sidecar, if configured.
+
+    When BGUTIL_POT_URL is set (Railway: http://bgutil-pot.railway.internal:4416),
+    yt-dlp mints YouTube proof-of-origin tokens through it — the maintained
+    escalation for datacenter-IP bot-walls (docs: yt-dlp wiki PO-Token-Guide).
+    Requires the bgutil-ytdlp-pot-provider pip plugin (in the Docker image).
+    """
+    return os.environ.get("BGUTIL_POT_URL") or None
+
+
+def _apply_pot_provider(opts: dict, clients: list[str] | None) -> list[str] | None:
+    """Wire the PO-token provider into a yt-dlp opts dict (no-op if unset).
+
+    Returns the (possibly adjusted) client list: with a provider configured,
+    the first attempt uses mweb — the client the POT approach is documented
+    to work with — instead of bare default web.
+    """
+    pot_url = _pot_provider_url()
+    if not pot_url:
+        return clients
+    ea = opts.setdefault("extractor_args", {})
+    ea["youtubepot-bgutilhttp"] = {"base_url": [pot_url]}
+    if clients is None:
+        return ["mweb"]
+    return clients
+
+
 def _try_ytdlp_chain(
     base_opts: dict,
     url: str,
@@ -68,11 +97,15 @@ def _try_ytdlp_chain(
     last_exc: Exception | None = None
     for clients in _YTDLP_CLIENT_CHAIN:
         opts = dict(base_opts)
+        clients = _apply_pot_provider(opts, clients)
         if clients is not None:
-            opts["extractor_args"] = {"youtube": {"player_client": clients}}
+            opts.setdefault("extractor_args", {})["youtube"] = {
+                "player_client": clients
+            }
             log.info(
-                "Retrying YouTube operation with player_client=%s",
+                "YouTube operation with player_client=%s%s",
                 ",".join(clients),
+                " (PO-token provider active)" if _pot_provider_url() else "",
                 extra={"url": url},
             )
         try:
@@ -112,6 +145,11 @@ def probe_youtube(url: str) -> None:
     Raises on failure (DRM, private video, bot-check, format unavailable).
     """
     base_opts: dict[str, Any] = {
+        # Resolve the SAME format selection the real download will use, so
+        # bot-walls / format-unavailable surface here — before LLM ranking
+        # spend — instead of at download time (2026-07-28 leak: probe passed,
+        # ranking paid, download then failed on every source).
+        "format": _YTDLP_FORMAT,
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,

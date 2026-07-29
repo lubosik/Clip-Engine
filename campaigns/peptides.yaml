@@ -49,7 +49,7 @@ sources:
     - "whiteboard"
   tiktok:
     profiles: []
-    hashtags: ["peptides", "bpc157", "looksmaxxing", "peptidetherapy"]
+    hashtags: []  # TikTok disabled: agentx transcripts $0.38/video (docs/APIFY_COSTS.md AVOID); YT-first campaign
   instagram:
     profiles: []
   # Skip paid Apify discovery while >= 20 unfinished sources sit in the DB
