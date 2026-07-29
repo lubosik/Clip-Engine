@@ -209,7 +209,21 @@ def probe_youtube(url: str) -> None:
         "skip_download": True,
     }
     log.info("Probing YouTube availability (no download)", extra={"url": url})
-    _try_ytdlp_chain(base_opts, url, download=False)
+    try:
+        _try_ytdlp_chain(base_opts, url, download=False)
+    except Exception as exc:
+        if _apify_downloader_available():
+            # The paid Apify downloader can fetch what yt-dlp cannot from this
+            # IP; don't kill the source on a probe bot-wall — the ranking spend
+            # (~$0.02) is an acceptable bet against the fallback succeeding.
+            log.warning(
+                "probe failed (%s) but Apify downloader fallback is available; "
+                "proceeding",
+                str(exc)[:160],
+                extra={"url": url},
+            )
+            return
+        raise
 
 
 def _download_youtube(url: str, dest: Path) -> Path:
@@ -303,11 +317,68 @@ def _get_instagram_video_url(raw: dict) -> str | None:
     return None
 
 
+_APIFY_DOWNLOADER_ACTOR = "api-ninja/youtube-video-downloader"
+
+
+def _apify_downloader_available() -> bool:
+    """The paid Apify downloader fallback is usable when a token is set."""
+    return bool(os.environ.get("APIFY_TOKEN"))
+
+
+def _download_youtube_via_apify(
+    url: str, dest: Path, campaign: str | None = None
+) -> Path:
+    """Download a YouTube video through the api-ninja Apify actor.
+
+    Operator-chosen reliable path (2026-07-29) for when yt-dlp is bot-walled
+    on the host IP. format=1080, ttl=none → temp downloadUrl (~15 min window),
+    streamed straight to `dest`. Spend lands in the apify_runs ledger
+    (kind='download'). Validated live: run SUCCEEDED, downloadUrl HTTP 200.
+    """
+    from core.apify import Apify
+
+    apify = Apify()
+    items = apify.run(
+        _APIFY_DOWNLOADER_ACTOR,
+        {"urls": [url], "format": "1080", "ttl": "none"},
+        campaign=campaign,
+        kind="download",
+    )
+    item = next(
+        (i for i in items if i.get("status") == "completed" and i.get("downloadUrl")),
+        None,
+    )
+    if item is None:
+        raise RuntimeError(
+            f"Apify downloader returned no completed item for {url}: "
+            f"{[{k: i.get(k) for k in ('status', 'error')} for i in items]}"
+        )
+    out = dest.with_suffix(".mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    log.info(
+        "Apify downloader: streaming %sMB from temp URL",
+        item.get("fileSizeMB"),
+        extra={"url": url},
+    )
+    with httpx.stream(
+        "GET", item["downloadUrl"], timeout=httpx.Timeout(30.0, read=600.0),
+        follow_redirects=True,
+    ) as resp:
+        resp.raise_for_status()
+        with out.open("wb") as fh:
+            for chunk in resp.iter_bytes(chunk_size=1 << 20):
+                fh.write(chunk)
+    if out.stat().st_size < 1024:
+        raise RuntimeError(f"Apify downloader produced a suspiciously small file for {url}")
+    return out
+
+
 def download_source(
     source_id: str,
     platform: str,
     url: str,
     raw: dict,
+    campaign: str | None = None,
 ) -> Path:
     """
     Download a source video to STORAGE_DIR/raw/.
@@ -317,6 +388,7 @@ def download_source(
         platform:  "youtube" | "tiktok" | "instagram"
         url:       canonical source URL
         raw:       original discovery item dict (may contain direct videoUrl)
+        campaign:  optional campaign name for the Apify spend ledger
 
     Returns:
         Path to the downloaded file.
@@ -327,7 +399,17 @@ def download_source(
     dest = raw_path(source_id)  # will be adjusted for actual extension
 
     if platform == "youtube":
-        return _download_youtube(url, dest)
+        try:
+            return _download_youtube(url, dest)
+        except Exception as exc:
+            if not _apify_downloader_available():
+                raise
+            log.warning(
+                "yt-dlp download failed (%s); falling back to Apify downloader",
+                str(exc)[:160],
+                extra={"url": url},
+            )
+            return _download_youtube_via_apify(url, dest, campaign=campaign)
 
     elif platform == "tiktok":
         video_url = _get_tiktok_video_url(raw)

@@ -164,11 +164,11 @@ def _pipeline_probe_youtube(url: str) -> None:
 
 
 def _pipeline_download_source(
-    source_id: str, platform: str, url: str, raw: dict
+    source_id: str, platform: str, url: str, raw: dict, campaign: str | None = None
 ) -> str:
     from producer.download import download_source
     return download_source(
-        source_id=source_id, platform=platform, url=url, raw=raw
+        source_id=source_id, platform=platform, url=url, raw=raw, campaign=campaign
     )
 
 
@@ -1048,7 +1048,7 @@ def run_video(
     # ── Step 5: Download + render all clips ──────────────────────────────────
     try:
         source_video_path = _pipeline_download_source(
-            source_id, "youtube", url, {}
+            source_id, "youtube", url, {}, campaign=campaign_name
         )
     except Exception as dl_exc:
         log.error("run_video: download failed for %s: %s", source_id, dl_exc)

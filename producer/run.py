@@ -408,6 +408,7 @@ def _process_source(
             platform=platform,
             url=url,
             raw=source.get("raw", {}),
+            campaign=campaign_cfg.name,
         )
 
         # Stage 7 & 8: render + insert clip rows
