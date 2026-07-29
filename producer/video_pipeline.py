@@ -134,6 +134,104 @@ def run_modal_spend(session: Any, campaign: str, since: Any) -> float:
         return 0.0
 
 
+# Chunked ranking: over ~this many minutes, one giant ranking prompt dilutes
+# the model's attention and yield collapses (168-min lecture → 4 raw
+# candidates on 2026-07-29 while a 130-min podcast got 19). Mine long
+# transcripts in windows so each section gets full attention.
+_RANK_CHUNK_MINUTES = 45.0
+_RANK_CHUNK_OVERLAP_MINUTES = 3.0
+_RANK_CHUNK_THRESHOLD_MINUTES = 75.0
+
+
+def _rank_in_chunks(
+    segments: list[dict],
+    ranking_cfg: Any,
+    *,
+    sentence_spans: list[dict] | None,
+    preference_context: str = "",
+    emit: Any = None,
+) -> list[dict]:
+    """Rank a transcript, windowing long ones into ~45-min chunks.
+
+    Short transcripts (< _RANK_CHUNK_THRESHOLD_MINUTES) go through one call,
+    exactly as before. Long ones are mined per-window (3-min overlap so a
+    moment straddling a boundary is seen whole by one window), results merged
+    and de-duplicated by >50% time overlap (higher score wins). Chunk-level
+    RankingUnavailable degrades to skipping that chunk unless EVERY chunk
+    fails, which re-raises.
+    """
+    duration_s = segments[-1]["end"] if segments else 0.0
+    if duration_s / 60.0 < _RANK_CHUNK_THRESHOLD_MINUTES:
+        return _pipeline_rank_moments(
+            segments, ranking_cfg,
+            sentence_spans=sentence_spans, preference_context=preference_context,
+        )
+
+    from core.llm import RankingUnavailable as _RU
+
+    chunk_s = _RANK_CHUNK_MINUTES * 60.0
+    overlap_s = _RANK_CHUNK_OVERLAP_MINUTES * 60.0
+    starts: list[float] = []
+    t = 0.0
+    while t < duration_s:
+        starts.append(t)
+        t += chunk_s - overlap_s
+
+    merged: list[dict] = []
+    failures = 0
+    for i, win_start in enumerate(starts, 1):
+        win_end = min(win_start + chunk_s, duration_s)
+        segs_w = [s for s in segments if s["end"] > win_start and s["start"] < win_end]
+        spans_w = (
+            [sp for sp in sentence_spans if sp["end"] > win_start and sp["start"] < win_end]
+            if sentence_spans else None
+        )
+        if not segs_w:
+            continue
+        if emit is not None:
+            try:
+                emit(
+                    f"Scanning section {i} of {len(starts)} "
+                    f"({int(win_start // 60)}:{int(win_start % 60):02d}"
+                    f"–{int(win_end // 60)}:{int(win_end % 60):02d})"
+                )
+            except Exception:
+                pass
+        try:
+            cands = _pipeline_rank_moments(
+                segs_w, ranking_cfg,
+                sentence_spans=spans_w, preference_context=preference_context,
+            )
+        except _RU as exc:
+            log.warning("chunk %d/%d ranking unavailable: %s", i, len(starts), exc)
+            failures += 1
+            continue
+        merged.extend(cands or [])
+
+    if failures and failures == len(starts):
+        raise _RU(f"ranking unavailable for all {len(starts)} chunks")
+
+    # De-dup overlapping candidates from window overlap: keep higher score.
+    merged.sort(key=lambda c: -(c.get("score") or 0.0))
+    kept: list[dict] = []
+    for c in merged:
+        dup = False
+        for k in kept:
+            ov = min(c["end"], k["end"]) - max(c["start"], k["start"])
+            shorter = min(c["end"] - c["start"], k["end"] - k["start"])
+            if shorter > 0 and ov / shorter > 0.5:
+                dup = True
+                break
+        if not dup:
+            kept.append(c)
+    kept.sort(key=lambda c: c["start"])
+    log.info(
+        "chunked ranking: %d windows -> %d raw, %d after overlap de-dup",
+        len(starts), len(merged), len(kept),
+    )
+    return kept
+
+
 def _pipeline_upsert_source(session: Any, candidate: dict, campaign_name: str) -> Any:
     from producer.dedupe import upsert_source
     return upsert_source(session, candidate, campaign_name)
@@ -1069,12 +1167,24 @@ def run_video(
         except Exception:
             preference_context = ""
 
+        def _emit_identifying(detail: str) -> None:
+            try:
+                with get_session() as _ev_session:
+                    _pipeline_emit_event(
+                        _ev_session, source_id, "identifying",
+                        status="running", detail=detail,
+                    )
+                    _ev_session.commit()
+            except Exception:
+                pass
+
         try:
-            raw_candidates = _pipeline_rank_moments(
+            raw_candidates = _rank_in_chunks(
                 segments,
                 ranking_cfg_for_call,
                 sentence_spans=sentence_spans,
                 preference_context=preference_context,
+                emit=_emit_identifying,
             )
         except RankingUnavailable as ru_exc:
             # Mirror TranscriptFetchError semantics: stage failed, source UNTOUCHED
