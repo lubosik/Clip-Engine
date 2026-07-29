@@ -70,6 +70,58 @@ def _apply_pot_provider(opts: dict, clients: list[str] | None) -> list[str] | No
     return clients
 
 
+_COOKIES_TMP: Path | None = None
+
+
+def _cookies_file() -> str | None:
+    """Path to a YouTube cookies.txt, if the operator configured one.
+
+    Escalation for hard IP walls that PO tokens don't clear (LOGIN_REQUIRED on
+    every client — hit on Railway 2026-07-29). Two forms:
+      YTDLP_COOKIES_FILE — path to a Netscape-format cookies.txt
+      YTDLP_COOKIES_B64  — base64 of the cookies.txt content (Railway-friendly:
+                           paste as an env var; decoded once per process to a
+                           chmod-600 temp file)
+    """
+    global _COOKIES_TMP
+    path = os.environ.get("YTDLP_COOKIES_FILE")
+    if path:
+        return path if Path(path).exists() else None
+    b64 = os.environ.get("YTDLP_COOKIES_B64")
+    if not b64:
+        return None
+    if _COOKIES_TMP is None or not _COOKIES_TMP.exists():
+        import base64
+        import tempfile
+
+        try:
+            data = base64.b64decode(b64)
+        except Exception:
+            log.warning("YTDLP_COOKIES_B64 is not valid base64; ignoring")
+            return None
+        fd, name = tempfile.mkstemp(prefix="yt_cookies_", suffix=".txt")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(name, 0o600)
+        _COOKIES_TMP = Path(name)
+    return str(_COOKIES_TMP)
+
+
+def _apply_network_escalations(opts: dict) -> None:
+    """Apply operator-configured cookies / proxy to a yt-dlp opts dict.
+
+    YTDLP_PROXY — proxy URL for yt-dlp traffic only (e.g. a flat-rate static
+    residential proxy: http://user:pass@host:port). Recommended over
+    per-GB rotating proxies — video downloads are hundreds of MB.
+    """
+    ck = _cookies_file()
+    if ck:
+        opts.setdefault("cookiefile", ck)
+    proxy = os.environ.get("YTDLP_PROXY")
+    if proxy:
+        opts.setdefault("proxy", proxy)
+
+
 def _try_ytdlp_chain(
     base_opts: dict,
     url: str,
@@ -98,6 +150,7 @@ def _try_ytdlp_chain(
     for clients in _YTDLP_CLIENT_CHAIN:
         opts = dict(base_opts)
         clients = _apply_pot_provider(opts, clients)
+        _apply_network_escalations(opts)
         if clients is not None:
             opts.setdefault("extractor_args", {})["youtube"] = {
                 "player_client": clients
