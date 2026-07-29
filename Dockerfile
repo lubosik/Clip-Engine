@@ -36,7 +36,9 @@ RUN pip install --no-cache-dir yt-dlp "bgutil-ytdlp-pot-provider==1.3.1"
 
 # Deno = yt-dlp's recommended JS runtime for YouTube player challenges
 # (current yt-dlp lists all JS challenge providers unavailable without one).
-RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- --yes \
+RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- --yes \
     && deno --version
 
 WORKDIR /app
