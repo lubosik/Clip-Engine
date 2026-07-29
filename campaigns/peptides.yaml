@@ -16,19 +16,19 @@ sources:
   # sent verbatim to the Apify YouTube scraper — write them like a human would
   # type them into YouTube, then filter to long videos.
   youtube:
-    search_terms:
-      - "peptides podcast interview BPC-157"
-      - "retatrutide experience podcast weight loss"
-      - "CJC-1295 ipamorelin growth hormone podcast"
-      - "More Plates More Dates peptides podcast"
-      - "peptides biohacking longevity podcast interview"
-      - "TB-500 BPC-157 healing podcast results"
-      - "GLP-1 semaglutide tirzepatide body composition podcast"
-      - "peptide therapy hormone optimization interview"
-      - "looksmaxxing peptides aesthetics podcast interview"
-      - "clavicular looksmaxxing interview podcast"
-      - "TRT testosterone looksmaxxing aesthetics podcast"
-      - "Jay Campbell peptides longevity podcast"
+    search_terms: []  # discovery paused 2026-07-29 (operator: Add-video flow only; revamp incoming)
+      #- "peptides podcast interview BPC-157"
+      #- "retatrutide experience podcast weight loss"
+      #- "CJC-1295 ipamorelin growth hormone podcast"
+      #- "More Plates More Dates peptides podcast"
+      #- "peptides biohacking longevity podcast interview"
+      #- "TB-500 BPC-157 healing podcast results"
+      #- "GLP-1 semaglutide tirzepatide body composition podcast"
+      #- "peptide therapy hormone optimization interview"
+      #- "looksmaxxing peptides aesthetics podcast interview"
+      #- "clavicular looksmaxxing interview podcast"
+      #- "TRT testosterone looksmaxxing aesthetics podcast"
+      #- "Jay Campbell peptides longevity podcast"
     channels: []
     exclude_channels:
       - "TED-Ed"
