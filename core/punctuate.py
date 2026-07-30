@@ -15,6 +15,7 @@ Returns:
     Returns None when:
     - the model is unavailable (import error, download failure, runtime error)
     - the transcript is empty
+    - post-alignment text coverage is below _COVERAGE_THRESHOLD
     The caller must fall back to the existing regex path in that case.
 
 Model:
@@ -30,15 +31,24 @@ Chunking:
 
 Alignment strategy:
     The model preserves word ORDER and only adds punctuation / capitalisation.
-    We do a sequential word-level alignment: for each output sentence, we
-    find its constituent words (stripped of added punctuation) in the original
-    concatenated text and record their char positions.  Those positions are
-    then mapped to timestamps via the char_times array built by
-    core.sentences._build_char_time_map.
+    We use difflib.SequenceMatcher to build a GLOBAL word-level alignment
+    between the model's output words and the original concatenated text words.
+    This avoids the false-anchor problem of greedy sequential matching: a single
+    mismatched token (censored word "[ __ ]", ">>" speaker marker, or
+    punctuator divergence) in the old code caused orig_cursor to leap forward
+    by thousands of words, silently dropping every subsequent sentence whose
+    words fell behind the new cursor position.
+
+Coverage guard:
+    After alignment, coverage = (chars of aligned sentence text) / (chars of
+    full_text) must be >= _COVERAGE_THRESHOLD (0.70).  Below that threshold
+    restore_sentences logs a WARNING and returns None so the caller falls back
+    to the regex sentence path, which uses all segment text.
 """
 
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 from typing import Any
@@ -53,6 +63,11 @@ log = logging.getLogger(__name__)
 
 _model: Any = None          # PunctCapSegModelONNX instance once loaded
 _model_load_failed: bool = False  # True after a permanent load failure
+
+# Minimum fraction of full_text chars that must be covered by aligned spans.
+# Below this threshold restore_sentences returns None and the caller falls back
+# to the regex sentence path.
+_COVERAGE_THRESHOLD: float = 0.70
 
 
 def _get_model() -> Any | None:
@@ -82,7 +97,7 @@ def _get_model() -> Any | None:
 
 
 # ---------------------------------------------------------------------------
-# Word-level sequential alignment
+# Word-level helpers
 # ---------------------------------------------------------------------------
 
 _WORD_RE = re.compile(r"\S+")
@@ -102,6 +117,10 @@ def _build_word_positions(text: str) -> list[tuple[int, int, str]]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Global alignment via SequenceMatcher
+# ---------------------------------------------------------------------------
+
 def _align_sentences_to_times(
     sentences: list[str],
     full_text: str,
@@ -109,82 +128,122 @@ def _align_sentences_to_times(
 ) -> list[dict] | None:
     """Map punctuation-restored sentences back to timestamps.
 
-    For each output sentence, the constituent words (stripped of added
-    punctuation) are matched sequentially against the original word list.
-    The char positions of the first and last matched words are mapped to
-    timestamps via char_times.
+    Uses difflib.SequenceMatcher to build a global word-level alignment
+    between the concatenated model output words and the original word list.
+    This is robust to the false-anchor failure mode of the previous greedy
+    scan: a single token mismatch (censored word, speaker marker, or
+    punctuator divergence) can no longer cause orig_cursor to leap forward,
+    silently dropping all subsequent sentences.
 
-    Returns None when alignment yields no usable spans (e.g. model output
-    completely diverged from the original text).
+    Algorithm:
+    1. Accumulate all model output words into a flat list, recording sentence
+       boundaries (out_start, out_end) for each sentence.
+    2. Run SequenceMatcher(output_words, orig_words) → monotonically increasing
+       matching blocks.
+    3. Build a sparse mapping out_word_idx → orig_word_idx from those blocks.
+    4. For each sentence, find the first and last orig word indices mapped from
+       its output word range.  Map those to char positions and timestamps.
+    5. Post-process: drop any span whose orig_start_idx < the previous span's
+       orig_end_idx (safety net; should be a no-op for well-ordered model output).
+
+    Returns None when no sentences could be aligned.  Coverage checking is
+    performed in restore_sentences, not here.
     """
     word_positions = _build_word_positions(full_text)
     if not word_positions:
         return None
 
-    result: list[dict] = []
-    orig_cursor = 0  # index into word_positions
+    orig_words: list[str] = [w[2] for w in word_positions]
+
+    # Accumulate model output words with sentence boundaries.
+    output_words: list[str] = []
+    sent_info: list[tuple[int, int, str]] = []  # (out_start, out_end_incl, text)
 
     for sentence in sentences:
         sentence = sentence.strip()
         if not sentence:
             continue
-
-        # Words in this output sentence (normalized for matching)
-        sent_tokens = sentence.split()
-        sent_words = [_normalize_word(w) for w in sent_tokens if _normalize_word(w)]
+        sent_words = [_normalize_word(w) for w in sentence.split() if _normalize_word(w)]
         if not sent_words:
             continue
+        out_start = len(output_words)
+        output_words.extend(sent_words)
+        out_end = len(output_words) - 1
+        sent_info.append((out_start, out_end, sentence))
 
-        # Find the span of original words that corresponds to this sentence.
-        # We search forward from orig_cursor.
-        found_start: int | None = None
-        found_end: int | None = None
-        word_match_cursor = 0  # how many sent_words we have matched so far
-        temp_orig_cursor = orig_cursor
+    if not output_words or not sent_info:
+        return None
 
-        for i in range(orig_cursor, len(word_positions)):
-            orig_word_norm = word_positions[i][2]
-            if orig_word_norm == sent_words[word_match_cursor]:
-                if word_match_cursor == 0:
-                    found_start = word_positions[i][0]   # char start of first word
-                word_match_cursor += 1
-                if word_match_cursor >= len(sent_words):
-                    found_end = word_positions[i][1] - 1  # char end of last word
-                    temp_orig_cursor = i + 1
-                    break
-            else:
-                # Mismatch — re-anchor to this position if it matches first sent word
-                if orig_word_norm == sent_words[0]:
-                    found_start = word_positions[i][0]
-                    word_match_cursor = 1
-                    if word_match_cursor >= len(sent_words):
-                        found_end = word_positions[i][1] - 1
-                        temp_orig_cursor = i + 1
-                        break
-                else:
-                    if word_match_cursor > 0:
-                        # Reset match attempt
-                        word_match_cursor = 0
-                        found_start = None
+    # Global word alignment.  autojunk=True (default) treats high-frequency
+    # words as junk — this is intentional: common words like "the" / "and"
+    # are exactly the false-anchor culprits in the old greedy code, and having
+    # difflib skip them speeds up the match significantly (0.6 s vs 4.5 s on a
+    # 22 K-word transcript).  The blocks returned are monotonically increasing
+    # in both sequences, which guarantees temporal ordering of the final spans.
+    matcher = difflib.SequenceMatcher(None, output_words, orig_words, autojunk=True)
 
-        if found_start is None or found_end is None:
-            # Alignment failed for this sentence; skip but don't abort everything
+    # Build sparse forward mapping: output_word_idx -> orig_word_idx.
+    out_to_orig: dict[int, int] = {}
+    for block in matcher.get_matching_blocks():
+        a, b, size = block.a, block.b, block.size
+        for k in range(size):
+            out_to_orig[a + k] = b + k
+
+    if not out_to_orig:
+        log.warning("punctuate: SequenceMatcher found no matching words; returning None")
+        return None
+
+    # Map each sentence to its char-level and time-level span.
+    result: list[dict] = []
+    prev_orig_end: int = -1  # for the non-overlap safety filter (word index)
+
+    for out_start, out_end, sentence_text in sent_info:
+        orig_start_idx: int | None = None
+        orig_end_idx: int | None = None
+
+        for out_idx in range(out_start, out_end + 1):
+            if out_idx in out_to_orig:
+                oi = out_to_orig[out_idx]
+                if orig_start_idx is None:
+                    orig_start_idx = oi
+                orig_end_idx = oi
+
+        if orig_start_idx is None:
+            # No matched words for this sentence — drop it.
             log.debug(
-                "Punctuate: could not align sentence %r to original text; skipping",
-                sentence[:60],
+                "Punctuate: no aligned words for sentence %r; skipping",
+                sentence_text[:60],
             )
             continue
 
-        orig_cursor = temp_orig_cursor
+        # Safety filter: drop spans that regress to already-covered orig positions.
+        # In practice this is a no-op for well-ordered model output; it prevents
+        # corruption if a sentence's junk-word-only boundary lands behind a
+        # previous sentence's boundary.
+        if orig_start_idx <= prev_orig_end:
+            log.debug(
+                "Punctuate: sentence %r orig_start %d <= prev_end %d; skipping",
+                sentence_text[:40],
+                orig_start_idx,
+                prev_orig_end,
+            )
+            continue
 
-        t_start = char_times[min(found_start, len(char_times) - 1)]
-        t_end = char_times[min(found_end, len(char_times) - 1)]
+        char_s = word_positions[orig_start_idx][0]
+        char_e = word_positions[orig_end_idx][1] - 1
+        char_e = max(char_s, char_e)  # guard against single-char words
+
+        n = len(char_times)
+        t_start = char_times[min(char_s, n - 1)]
+        t_end = char_times[min(char_e, n - 1)]
+        t_end = max(t_start, t_end)  # ensure non-negative duration
 
         result.append({
-            "text": sentence,
+            "text": sentence_text,
             "start": t_start,
             "end": t_end,
         })
+        prev_orig_end = orig_end_idx
 
     return result if result else None
 
@@ -202,7 +261,9 @@ def restore_sentences(segments: list[dict]) -> list[dict] | None:
     Returns:
         list[{"text": str, "start": float, "end": float}] — one entry per
         sentence, with timestamps derived from character-level interpolation.
-        Returns None on any failure so callers can fall back to the regex path.
+        Returns None on any failure (model unavailable, alignment failure, or
+        coverage below _COVERAGE_THRESHOLD) so callers can fall back to the
+        regex path.
     """
     if not segments:
         return None
@@ -239,9 +300,28 @@ def restore_sentences(segments: list[dict]) -> list[dict] | None:
         log.warning("punctuate: alignment produced no spans; returning None")
         return None
 
+    # Coverage guard: if the aligned spans cover less than _COVERAGE_THRESHOLD
+    # of the full text, the alignment has likely collapsed (false anchors,
+    # chunk-boundary garbling, etc.).  Return None so the caller uses the regex
+    # sentence path, which retains all segment text.
+    aligned_chars = sum(len(s["text"]) for s in result)
+    total_chars = len(full_text)
+    coverage = aligned_chars / total_chars if total_chars > 0 else 0.0
+    if coverage < _COVERAGE_THRESHOLD:
+        log.warning(
+            "punctuate: low coverage %.1f%% (%d/%d chars); "
+            "falling back to regex sentence path",
+            coverage * 100,
+            aligned_chars,
+            total_chars,
+        )
+        return None
+
     log.info(
-        "Punctuation restoration complete: %d segments → %d sentences",
+        "Punctuation restoration complete: %d segments → %d sentences "
+        "(coverage %.1f%%)",
         len(segments),
         len(result),
+        coverage * 100,
     )
     return result

@@ -1465,7 +1465,7 @@ function _openAddVideoSheet(campaign) {
       if (err.status === 401) { _avClose(backdrop); _ctx.onUnauthorized(); return; }
 
       if (err.status === 409) {
-        _avShowForce(backdrop, () => submit(true));
+        _avShowForce(backdrop, () => submit(true), err.detail);
         return;
       }
 
@@ -1487,17 +1487,36 @@ function _avClose(backdrop) {
   setTimeout(() => backdrop.remove(), 310);
 }
 
-function _avShowForce(backdrop, onForce) {
+/**
+ * Show the "already processed" force panel inside the Add-video sheet.
+ *
+ * @param {HTMLElement} backdrop
+ * @param {() => void} onForce    Called when the operator taps "Re-clip anyway"
+ * @param {{ clips_found?: number, error?: string } | undefined} detail
+ *   Structured 409 detail from the server (may be undefined for older servers)
+ */
+function _avShowForce(backdrop, onForce, detail) {
   // Remove duplicate if already shown
   backdrop.querySelector('.av-force-wrap')?.remove();
+
+  const clipsFound = typeof detail?.clips_found === 'number' ? detail.clips_found : null;
+  const countLine = clipsFound === null
+    ? 'This video was already processed for this campaign.'
+    : clipsFound === 0
+      ? 'This video was already processed — no clips were found.'
+      : `This video was already processed — ${clipsFound} clip${clipsFound !== 1 ? 's' : ''} found.`;
 
   const wrap = document.createElement('div');
   wrap.className = 'av-force-wrap';
   wrap.innerHTML = `
-    <div class="source-stage-error" style="margin-bottom:10px">
-      <p class="source-error-text">
-        This video was already fully processed for this campaign.
-      </p>
+    <div class="av-force-notice">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="12" y1="8" x2="12" y2="12"/>
+        <line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      <p class="av-force-notice-text">${_esc(countLine)}</p>
     </div>
     <button class="btn btn-secondary btn-full" id="av-reclip-btn" type="button">
       Re-clip anyway

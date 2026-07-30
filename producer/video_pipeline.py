@@ -229,6 +229,17 @@ def _rank_in_chunks(
         "chunked ranking: %d windows -> %d raw, %d after overlap de-dup",
         len(starts), len(merged), len(kept),
     )
+
+    # Partial-failure + zero-yield guard: if some chunks failed AND the
+    # surviving chunks yielded nothing, the source is likely retryable rather
+    # than genuinely clip-free.  Raise RankingUnavailable so the pipeline keeps
+    # the source in a retryable state instead of exhausting it.
+    if failures > 0 and not kept:
+        raise _RU(
+            f"partial chunk ranking failed ({failures}/{len(starts)} chunks) "
+            "and produced zero candidates; source remains retryable"
+        )
+
     return kept
 
 
@@ -1074,8 +1085,55 @@ def run_video(
                 tr_row = session.query(_Tr).filter_by(source_id=source_id).first()
                 if tr_row is not None:
                     if tr_row.sentences is not None:
-                        sentence_spans = tr_row.sentences
-                        _transcript_was_cached = True
+                        # Bad-cache healing: cached spans may have been produced
+                        # by the old greedy alignment that silently dropped ~70%
+                        # of the transcript.  If the total text in the cached
+                        # spans is less than 50% of the raw segment text, treat
+                        # the cache as corrupt and recompute.
+                        seg_text_chars = sum(
+                            len(s.get("text") or "") for s in segments
+                        )
+                        cached_text_chars = sum(
+                            len(s.get("text") or "") for s in tr_row.sentences
+                        )
+                        bad_cache = (
+                            seg_text_chars > 0
+                            and cached_text_chars < 0.5 * seg_text_chars
+                        )
+                        if bad_cache:
+                            log.warning(
+                                "run_video: cached sentences for %s look corrupt "
+                                "(%d/%d chars, %.1f%%) — recomputing",
+                                source_id,
+                                cached_text_chars,
+                                seg_text_chars,
+                                100.0 * cached_text_chars / seg_text_chars,
+                            )
+                            fresh = _restore(segments)
+                            if fresh is not None:
+                                tr_row.sentences = fresh
+                                session.commit()
+                                sentence_spans = fresh
+                                log.info(
+                                    "run_video: healed sentence cache for %s "
+                                    "(%d spans)",
+                                    source_id,
+                                    len(fresh),
+                                )
+                            else:
+                                # Recompute also failed — null the cached row so
+                                # it doesn't re-trip the bad-cache branch next run
+                                tr_row.sentences = None
+                                session.commit()
+                                sentence_spans = None
+                                log.warning(
+                                    "run_video: recompute failed for %s; "
+                                    "nulling cached sentences",
+                                    source_id,
+                                )
+                        else:
+                            sentence_spans = tr_row.sentences
+                            _transcript_was_cached = True
                     else:
                         sentence_spans = _restore(segments)
                         if sentence_spans is not None:

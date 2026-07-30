@@ -59,6 +59,7 @@ async function request(method, path, { body, multipart = false } = {}) {
       } else if (d && typeof d === 'object') {
         // This app's HTTPExceptions: {error: "...", code: ...}
         message = d.error || d.message || JSON.stringify(d);
+        err.detail = d;  // attach full structured payload for callers that need it
       }
     } catch { /* ignore parse error */ }
     const err = new Error(message);

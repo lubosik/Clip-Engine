@@ -2676,6 +2676,11 @@ def add_campaign_video(
                                 "Pass force=true to re-clip."
                             ),
                             "code": 409,
+                            "clips_found": (
+                                existing.clips_identified
+                                if existing.clips_identified is not None
+                                else 0
+                            ),
                         },
                     )
         except HTTPException:

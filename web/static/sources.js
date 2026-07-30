@@ -365,16 +365,34 @@ function _buildProgressCard(state) {
     const detail       = Array.isArray(clips_detail) ? clips_detail : [];
     const readyCount   = detail.filter((c) => c.stage === 'ready').length;
     const failedCount  = detail.filter((c) => c.stage === 'didnt_pass').length;
-    terminalHtml = `
-      <div class="source-terminal-summary">
-        <a href="#queue-ready"   class="source-terminal-link source-terminal-link--ready">
-          ${readyCount} ready
-        </a>
-        <span class="source-terminal-sep"> / </span>
-        <a href="#queue-failed"  class="source-terminal-link source-terminal-link--failed">
-          ${failedCount} didn't pass
-        </a>
-      </div>`;
+
+    // The final detail message (e.g. "0 clips identified — source exhausted")
+    // is suppressed from the caption line on complete, so surface it here.
+    const detailLine = latest_detail
+      ? `<div class="source-terminal-detail">${_esc(latest_detail)}</div>`
+      : '';
+
+    if (readyCount === 0 && failedCount === 0) {
+      // 0-clip run — show a plain human-readable explanation so the card
+      // doesn't look broken with "0 ready / 0 didn't pass" links.
+      const msg = latest_detail || 'No clips found in this video';
+      terminalHtml = `
+        <div class="source-terminal-summary source-terminal-summary--empty">
+          <span class="source-terminal-empty-msg">${_esc(msg)}</span>
+        </div>`;
+    } else {
+      terminalHtml = `
+        <div class="source-terminal-summary">
+          ${detailLine}
+          <a href="#queue-ready"   class="source-terminal-link source-terminal-link--ready">
+            ${readyCount} ready
+          </a>
+          <span class="source-terminal-sep"> / </span>
+          <a href="#queue-failed"  class="source-terminal-link source-terminal-link--failed">
+            ${failedCount} didn't pass
+          </a>
+        </div>`;
+    }
   }
 
   // ── Error block (failed) ────────────────────────────────────────────────────
@@ -698,9 +716,16 @@ async function _discoverSources() {
     }
   }
 
-  // Disconnect sources that are no longer in-progress
+  // Disconnect sources that are no longer in-progress.
+  // Exception: keep terminal-state (complete / failed) cards visible until the
+  // user navigates away — removing them immediately after a fast run causes the
+  // "glitchy disappearing card" the operator reported.
   for (const id of [..._sourceConns.keys()]) {
-    if (!currentIds.has(id)) _disconnectSource(id);
+    if (!currentIds.has(id)) {
+      const st = _sourceStates.get(id);
+      if (st && (st.stage === 'complete' || st.stage === 'failed')) continue;
+      _disconnectSource(id);
+    }
   }
 
   _scheduleRender();

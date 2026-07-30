@@ -649,7 +649,29 @@ export const inProgressScenes = {
     },
   ],
 
-  // 5. Complete — all clips processed; panel shows terminal summary
+  // 5. Complete with 0 clips — demonstrates the "no clips found" terminal state
+  zeroClipComplete: [
+    {
+      source_id: 'youtube:mock_zeroclip',
+      stage: 'complete',
+      title: 'H3urx7pV840 — Test Video (No Clips Found)',
+      url: 'https://youtube.com/watch?v=H3urx7pV840',
+      platform: 'youtube',
+      author_handle: 'TestChannel',
+      campaign: 'peptides',
+      thumbnail_url: null,
+      stage_error: null,
+      clips_detail: [],
+      last_event_id: '4',
+      progress_n: null,
+      progress_total: 0,
+      latest_detail: '0 clips identified — source exhausted',
+      latest_ts: _msAgo(3_000),
+      stage_elapsed: { queued: 2, transcribing: 18, identifying: 22, complete: 1 },
+    },
+  ],
+
+  // 6. Complete — all clips processed; panel shows terminal summary
   complete: [
     {
       source_id: 'youtube:mock_complete',

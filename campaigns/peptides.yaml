@@ -69,7 +69,7 @@ ranking:
   max_clips_per_source: 8
   exhaust_source: true          # reuse the same podcast across runs, new moments only
   min_score: 0.55  # lowered 2026-07-29 w/ exhaustive-mining mandate; critic gates quality
-  stance: "pro-peptide: content must present peptides positively or neutrally-curious; never framing peptides as inferior, disappointing, or beaten by alternatives"
+  stance: "pro-peptide and pro-self-improvement: content must present peptides and looksmaxxing positively or neutrally-curious; never framing peptides as inferior, disappointing, or beaten by alternatives, and never framing improving your looks as pointless or cringe"
   ranking_rules: |
     You are selecting short-form clips for VICI PEPTIDES. Optimise for
     scroll-stopping, conversion, and topical fit. Pick moments that stand
@@ -77,13 +77,14 @@ ranking:
 
     HARD TOPICAL GATE (apply FIRST, before anything else): This source is only
     usable if it substantively discusses PEPTIDES / hormones / TRT, or
-    LOOKSMAXXING / facial aesthetics / the blackpill. If the transcript is
-    really about generic fitness, training splits, body types (ectomorph/
-    endomorph), dieting, fighting, or nutrition WITHOUT a genuine peptide/
-    hormone or looksmaxxing angle, return an EMPTY array []. Do NOT stretch a
-    general fitness clip to fit. A moment only qualifies if it is clearly about
-    one of the campaign topics below — when a moment is merely fitness-adjacent,
-    skip it.
+    LOOKSMAXXING / facial aesthetics / looking better / the blackpill. These
+    two topics carry EQUAL weight — a pure looksmaxxing source with zero
+    peptide mentions is fully on-topic; mine it just as hard. If the
+    transcript is really about generic fitness, training splits, body types
+    (ectomorph/endomorph), dieting, fighting, or nutrition WITHOUT a genuine
+    peptide/hormone or looksmaxxing angle, return an EMPTY array []. Do NOT
+    stretch a general fitness clip to fit. When a moment is merely
+    fitness-adjacent, skip it.
 
     WHAT THIS CAMPAIGN IS ABOUT (a moment must clearly be one of these):
     - Peptides: how they work (GH secretagogues stimulating the pituitary,
@@ -95,21 +96,30 @@ ranking:
       Thymosin.
     - First-hand experiences and opinions of being on peptides (results,
       recovery, sleep, fat loss, how they felt) — authentic and compelling.
-    - Looksmaxxing / aesthetics / the blackpill: improving how you look and
-      feel, facial-aesthetics rating culture, jaw/canthal tilt/hunter eyes,
-      mewing, and the overlap of hormones/peptides with looking better.
-      Content about or by "Clavicular" and natural looksmaxxing fits here.
+    - Looksmaxxing / aesthetics / the blackpill: ANYTHING about improving how
+      you look and feel — facial-aesthetics rating culture, jaw/canthal tilt/
+      hunter eyes, mewing, skincare/hair/grooming upgrades, procedures and
+      surgeries (what they cost, what they change, whether they're worth it),
+      before/after transformations, how being better-looking changes how the
+      world treats you, and the overlap of hormones/peptides with looking
+      better. Content about or by "Clavicular" and natural looksmaxxing fits
+      here, INCLUDING the money/lifestyle side (what looksmaxxers earn and
+      spend, why people pay for it) — those moments go viral.
 
     MINE EXHAUSTIVELY (this is a mining job, not a shortlist): a clip is ANY
     self-contained moment that gives the viewer real value or invokes emotion,
     shows peptides in a good light, and triggers buying intent. Sweep the WHOLE
     transcript start to finish and identify EVERY moment that fits one of
     these categories:
-    - WHAT IT DOES: what a specific peptide/compound does and how it works.
+    - WHAT IT DOES: what a specific peptide/compound/procedure/technique does
+      and how it works.
     - EFFECT/BENEFIT: the concrete outcome, result, or transformation.
     - EXPERIENCE: a first-hand story or someone's real results.
     - MISCONCEPTION: something people get wrong, corrected.
     - MYTH BUSTED: a mainstream belief taken apart (these convert hard).
+    - VIRAL MOMENT: an exceptional self-contained moment from an on-topic
+      source — a shocking number, a wild story, a bold claim, a heated
+      exchange — that this audience would share even if no compound is named.
     A long podcast on-topic for this campaign typically contains 10-30
     qualifying moments — if you found only a handful, you almost certainly
     stopped too early; re-scan the parts you skimmed. Return EVERY qualifying

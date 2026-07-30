@@ -106,3 +106,52 @@ def test_emit_called_per_window(monkeypatch):
                        emit=details.append)
     assert len(details) == 4
     assert details[0].startswith("Scanning section 1 of 4")
+
+
+def test_partial_fail_zero_yield_raises_ranking_unavailable(monkeypatch):
+    """Partial chunk failure + zero surviving candidates → RankingUnavailable.
+
+    Previously _rank_in_chunks returned [] in this case, which caused the
+    pipeline to treat the source as exhausted.  Now it must raise so the
+    source stays retryable.
+    """
+    from core.llm import RankingUnavailable
+
+    n = {"i": 0}
+
+    def fake_rank(*a, **k):
+        n["i"] += 1
+        if n["i"] % 2 == 0:
+            # Every even window fails
+            raise RankingUnavailable("network blip")
+        # Odd windows return empty (no clips found)
+        return []
+
+    monkeypatch.setattr(vp, "_pipeline_rank_moments", fake_rank)
+    with pytest.raises(RankingUnavailable):
+        vp._rank_in_chunks(_segs(168 * 60), _Cfg(), sentence_spans=None)
+
+
+def test_partial_fail_with_surviving_candidates_returns_them(monkeypatch):
+    """Partial chunk failure + at least one surviving candidate → returns kept list.
+
+    The guard must NOT raise when failures > 0 but there are valid clips from
+    the surviving windows.
+    """
+    from core.llm import RankingUnavailable
+
+    n = {"i": 0}
+
+    def fake_rank(*a, **k):
+        n["i"] += 1
+        if n["i"] == 1:
+            # First window fails
+            raise RankingUnavailable("transient error")
+        # Remaining windows each return one clip
+        t = n["i"] * 3000.0
+        return [{"start": t, "end": t + 30, "score": 0.8, "hook": "h", "reason": ""}]
+
+    monkeypatch.setattr(vp, "_pipeline_rank_moments", fake_rank)
+    out = vp._rank_in_chunks(_segs(168 * 60), _Cfg(), sentence_spans=None)
+    # 4 windows, 1 failed, 3 each returned 1 clip → 3 candidates kept
+    assert len(out) == 3
